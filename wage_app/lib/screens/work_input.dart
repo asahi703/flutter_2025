@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
-class WorkInputScreen extends StatelessWidget {
-  const WorkInputScreen({super.key});
+class WorkInput extends StatelessWidget {
+  const WorkInput({super.key});
 
   @override
   Widget build(BuildContext context) {

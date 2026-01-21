@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
+import 'job_management.dart';
+import 'work_input.dart';
+import 'history.dart';
 
-class HomeScreen extends StatelessWidget {
-  const HomeScreen({super.key});
+class Home extends StatelessWidget {
+  const Home({super.key});
 
   @override
   Widget build(BuildContext context) {
