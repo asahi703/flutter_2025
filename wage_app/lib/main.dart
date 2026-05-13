@@ -42,7 +42,7 @@ class _WageAppMainState extends State<WageAppMain> {
 
   static const List<String> _titles = [
     'ホーム',
-    'バイト先管理',
+    '勤務先管理',
     '勤務入力',
     '履歴一覧',
   ];
@@ -68,7 +68,7 @@ class _WageAppMainState extends State<WageAppMain> {
         type: BottomNavigationBarType.fixed,
         items: const [
           BottomNavigationBarItem(icon: Icon(Icons.home), label: 'ホーム'),
-          BottomNavigationBarItem(icon: Icon(Icons.business), label: 'バイト先'),
+          BottomNavigationBarItem(icon: Icon(Icons.business), label: '勤務先'),
           BottomNavigationBarItem(icon: Icon(Icons.access_time), label: '勤務入力'),
           BottomNavigationBarItem(icon: Icon(Icons.history), label: '履歴'),
         ],
