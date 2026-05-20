@@ -17,12 +17,26 @@ class WorkInput extends StatefulWidget {
 
 class _WorkInputState extends State<WorkInput> {
   DateTime? _selectedDate;
-  final TextEditingController _startController = TextEditingController();
-  final TextEditingController _endController = TextEditingController();
+  TimeOfDay? _selectedStartTime;
+  TimeOfDay? _selectedEndTime;
   int? _selectedWorkplaceId;
 
   String _formatDate(DateTime date) {
     return '${date.year}/${date.month.toString().padLeft(2, '0')}/${date.day.toString().padLeft(2, '0')}';
+  }
+
+  String _formatTime(TimeOfDay time) {
+    return '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
+  }
+
+  List<TimeOfDay> _generateTimeOptions() {
+    final List<TimeOfDay> times = [];
+    for (int hour = 0; hour < 24; hour++) {
+      for (int minute = 0; minute < 60; minute += 15) {
+        times.add(TimeOfDay(hour: hour, minute: minute));
+      }
+    }
+    return times;
   }
 
   Future<void> _pickDate() async {
@@ -40,29 +54,11 @@ class _WorkInputState extends State<WorkInput> {
     }
   }
 
-  TimeOfDay? _parseTime(String text) {
-    final parts = text.split(':');
-    if (parts.length != 2) {
-      return null;
-    }
-    final hour = int.tryParse(parts[0]);
-    final minute = int.tryParse(parts[1]);
-    if (hour == null || minute == null) {
-      return null;
-    }
-    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
-      return null;
-    }
-    return TimeOfDay(hour: hour, minute: minute);
-  }
-
   void _saveShift() {
-    final startTime = _parseTime(_startController.text);
-    final endTime = _parseTime(_endController.text);
     if (_selectedDate == null ||
         _selectedWorkplaceId == null ||
-        startTime == null ||
-        endTime == null) {
+        _selectedStartTime == null ||
+        _selectedEndTime == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('すべての項目を正しく入力してください。')),
       );
@@ -71,13 +67,13 @@ class _WorkInputState extends State<WorkInput> {
     widget.onSaveShift(
       _selectedDate!,
       _selectedWorkplaceId!,
-      startTime,
-      endTime,
+      _selectedStartTime!,
+      _selectedEndTime!,
     );
     setState(() {
       _selectedDate = null;
-      _startController.clear();
-      _endController.clear();
+      _selectedStartTime = null;
+      _selectedEndTime = null;
       _selectedWorkplaceId = null;
     });
     ScaffoldMessenger.of(context).showSnackBar(
@@ -87,8 +83,6 @@ class _WorkInputState extends State<WorkInput> {
 
   @override
   void dispose() {
-    _startController.dispose();
-    _endController.dispose();
     super.dispose();
   }
 
@@ -132,22 +126,38 @@ class _WorkInputState extends State<WorkInput> {
           Row(
             children: [
               Expanded(
-                child: TextFormField(
-                  controller: _startController,
-                  decoration: const InputDecoration(
-                    labelText: '開始時刻 (HH:mm)',
-                  ),
-                  keyboardType: TextInputType.datetime,
+                child: DropdownButtonFormField<TimeOfDay>(
+                  value: _selectedStartTime,
+                  decoration: const InputDecoration(labelText: '開始時刻'),
+                  items: _generateTimeOptions().map((time) {
+                    return DropdownMenuItem<TimeOfDay>(
+                      value: time,
+                      child: Text(_formatTime(time)),
+                    );
+                  }).toList(),
+                  onChanged: (value) {
+                    setState(() {
+                      _selectedStartTime = value;
+                    });
+                  },
                 ),
               ),
               const SizedBox(width: 12),
               Expanded(
-                child: TextFormField(
-                  controller: _endController,
-                  decoration: const InputDecoration(
-                    labelText: '終了時刻 (HH:mm)',
-                  ),
-                  keyboardType: TextInputType.datetime,
+                child: DropdownButtonFormField<TimeOfDay>(
+                  value: _selectedEndTime,
+                  decoration: const InputDecoration(labelText: '終了時刻'),
+                  items: _generateTimeOptions().map((time) {
+                    return DropdownMenuItem<TimeOfDay>(
+                      value: time,
+                      child: Text(_formatTime(time)),
+                    );
+                  }).toList(),
+                  onChanged: (value) {
+                    setState(() {
+                      _selectedEndTime = value;
+                    });
+                  },
                 ),
               ),
             ],
