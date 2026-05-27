@@ -39,7 +39,10 @@ class _WorkInputState extends State<WorkInput> {
   TimeOfDay? _selectedEndTime;
   int? _selectedWorkplaceId;
   bool _isOcrProcessing = false;
-  final ImagePicker _picker = ImagePicker();
+final ImagePicker _picker = ImagePicker();
+
+String _ocrRawText = '';
+List<String> _ocrLines = [];
 
   String _formatDate(DateTime date) {
     return '${date.year}/${date.month.toString().padLeft(2, '0')}/${date.day.toString().padLeft(2, '0')}';
@@ -104,10 +107,21 @@ class _WorkInputState extends State<WorkInput> {
     final File tempFile = File('${Directory.systemTemp.path}/ocr_shift_${DateTime.now().millisecondsSinceEpoch}.jpg');
     await tempFile.writeAsBytes(processedBytes, flush: true);
     final String recognizedText = await FlutterTesseractOcr.extractText(
-      tempFile.path,
-      language: 'jpn',
-    );
-    return _parseOcrText(recognizedText);
+  tempFile.path,
+  language: 'jpn',
+);
+
+setState(() {
+  _ocrRawText = recognizedText;
+
+  _ocrLines = recognizedText
+      .split(RegExp(r'[\r\n]+'))
+      .map((e) => e.trim())
+      .where((e) => e.isNotEmpty)
+      .toList();
+});
+
+return _parseOcrText(recognizedText);
   }
 
   Future<Uint8List> _preprocessImage(Uint8List imageBytes) async {
@@ -131,11 +145,16 @@ class _WorkInputState extends State<WorkInput> {
 
   ShiftData? _parseOcrText(String text) {
     final String normalized = text
-        .replaceAll('：', ':')
-        .replaceAll('―', '-')
-        .replaceAll('〜', '-')
-        .replaceAll('～', '-')
-        .replaceAll('–', '-');
+    .replaceAll('：', ':')
+    .replaceAll('．', '.')
+    .replaceAll('。', '.')
+    .replaceAll('時', ':')
+    .replaceAll('分', '')
+    .replaceAll('―', '-')
+    .replaceAll('〜', '-')
+    .replaceAll('～', '-')
+    .replaceAll('–', '-')
+    .replaceAll('ー', '-');
 
     final List<String> lines = normalized
         .split(RegExp(r'[\r\n]+'))
@@ -146,7 +165,8 @@ class _WorkInputState extends State<WorkInput> {
     String name = '';
     String startTime = '';
     String endTime = '';
-    final RegExp timeRegex = RegExp(r'(\d{1,2})[:](\d{2})');
+    final RegExp timeRegex =
+    RegExp(r'(\d{1,2})[:：.\s]?(\d{2})');
 
     for (final line in lines) {
       final matches = timeRegex.allMatches(line).toList();
@@ -183,8 +203,11 @@ class _WorkInputState extends State<WorkInput> {
     }
 
     if (startTime.isEmpty || endTime.isEmpty) {
-      return null;
-    }
+  debugPrint('OCR解析失敗');
+  debugPrint(normalized);
+
+  return null;
+}
 
     return ShiftData(name: name, startTime: startTime, endTime: endTime);
   }
@@ -404,7 +427,57 @@ class _WorkInputState extends State<WorkInput> {
             child: const Text('シフトを保存'),
           ),
           const SizedBox(height: 12),
-          const Text('勤務先は事前に「勤務先管理」で登録してください。'),
+          const SizedBox(height: 20),
+
+ExpansionTile(
+  title: const Text('OCRデバッグ情報'),
+  children: [
+    Padding(
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'OCR全文',
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+
+          const SizedBox(height: 8),
+
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            color: Colors.grey.shade200,
+            child: SelectableText(_ocrRawText),
+          ),
+
+          const SizedBox(height: 20),
+
+          const Text(
+            'OCR行解析',
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+
+          const SizedBox(height: 8),
+
+          ..._ocrLines.map(
+            (line) => Container(
+              width: double.infinity,
+              margin: const EdgeInsets.only(bottom: 6),
+              padding: const EdgeInsets.all(8),
+              color: Colors.grey.shade100,
+              child: Text(line),
+            ),
+          ),
+        ],
+      ),
+    ),
+  ],
+),
         ],
       ),
     );
