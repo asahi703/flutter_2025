@@ -4,7 +4,8 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:image/image.dart' as image_lib;
 import 'package:image_picker/image_picker.dart';
-import 'package:flutter_tesseract_ocr/flutter_tesseract_ocr.dart';
+import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:flutter/services.dart';
 
 class ShiftData {
   final String name;
@@ -63,66 +64,110 @@ List<String> _ocrLines = [];
   }
 
   Future<void> _startOcrFlow() async {
-    try {
-      final XFile? pickedImage = await _picker.pickImage(source: ImageSource.gallery);
-      if (pickedImage == null) {
-        return;
-      }
+  try {
+    setState(() {
+      _isOcrProcessing = true;
+    });
 
-      setState(() {
-        _isOcrProcessing = true;
-      });
+    debugPrint('assets画像読み込み開始');
 
-      final ShiftData? ocrResult = await _performOcrFromImage(pickedImage);
-      if (ocrResult == null) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('OCRで有効なシフト情報が見つかりませんでした。')),
-          );
-        }
-        return;
-      }
+    final ByteData data =
+        await rootBundle.load('assets/images/test.png');
 
-      if (mounted) {
-        await _showOcrConfirmationDialog(ocrResult);
-      }
-    } catch (e) {
+    final Uint8List bytes = data.buffer.asUint8List();
+
+    final File tempFile = File(
+      '${Directory.systemTemp.path}/ocr_test.png',
+    );
+
+    await tempFile.writeAsBytes(bytes);
+
+    debugPrint('assets画像保存完了');
+
+    final XFile imageFile = XFile(tempFile.path);
+
+    final ShiftData? ocrResult =
+        await _performOcrFromImage(imageFile);
+
+    if (ocrResult == null) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('OCR処理中にエラーが発生しました: $e')),
+          const SnackBar(
+            content: Text('OCRで文字を認識できませんでした'),
+          ),
         );
       }
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isOcrProcessing = false;
-        });
-      }
+      return;
+    }
+
+    if (mounted) {
+      await _showOcrConfirmationDialog(ocrResult);
+    }
+  } catch (e) {
+    debugPrint(e.toString());
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('OCRエラー: $e'),
+        ),
+      );
+    }
+  } finally {
+    if (mounted) {
+      setState(() {
+        _isOcrProcessing = false;
+      });
     }
   }
+}
 
   Future<ShiftData?> _performOcrFromImage(XFile imageFile) async {
-    final Uint8List rawBytes = await imageFile.readAsBytes();
-    final Uint8List processedBytes = await _preprocessImage(rawBytes);
-    final File tempFile = File('${Directory.systemTemp.path}/ocr_shift_${DateTime.now().millisecondsSinceEpoch}.jpg');
-    await tempFile.writeAsBytes(processedBytes, flush: true);
-    final String recognizedText = await FlutterTesseractOcr.extractText(
-  tempFile.path,
-  language: 'jpn',
-);
+  try {
+    debugPrint('OCR開始');
 
-setState(() {
-  _ocrRawText = recognizedText;
+    final InputImage inputImage =
+        InputImage.fromFilePath(imageFile.path);
 
-  _ocrLines = recognizedText
-      .split(RegExp(r'[\r\n]+'))
-      .map((e) => e.trim())
-      .where((e) => e.isNotEmpty)
-      .toList();
-});
+    debugPrint('InputImage作成完了');
 
-return _parseOcrText(recognizedText);
+    final textRecognizer = TextRecognizer();
+
+    debugPrint('TextRecognizer作成完了');
+
+    final RecognizedText recognizedText =
+        await textRecognizer.processImage(inputImage);
+
+    debugPrint('OCR解析完了');
+
+    await textRecognizer.close();
+
+    final String recognized = recognizedText.text;
+
+    debugPrint('OCR全文');
+    debugPrint(recognized);
+
+    setState(() {
+      _ocrRawText = recognized;
+
+      _ocrLines = recognized
+          .split(RegExp(r'[\r\n]+'))
+          .map((e) => e.trim())
+          .where((e) => e.isNotEmpty)
+          .toList();
+    });
+
+    if (recognized.trim().isEmpty) {
+      return null;
+    }
+
+    return _parseOcrText(recognized);
+  } catch (e) {
+    debugPrint('OCR内部エラー');
+    debugPrint(e.toString());
+    rethrow;
   }
+}
 
   Future<Uint8List> _preprocessImage(Uint8List imageBytes) async {
     final image_lib.Image? original = image_lib.decodeImage(imageBytes);
