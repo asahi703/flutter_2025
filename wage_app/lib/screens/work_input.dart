@@ -19,6 +19,18 @@ class ShiftData {
   });
 }
 
+class ShiftCandidate {
+  final String line;
+  final String startTime;
+  final String endTime;
+
+  ShiftCandidate({
+    required this.line,
+    required this.startTime,
+    required this.endTime,
+  });
+}
+
 class WorkInput extends StatefulWidget {
   final List<Map<String, dynamic>> workplaces;
   final void Function(DateTime date, int workplaceId, TimeOfDay startTime, TimeOfDay endTime)
@@ -44,6 +56,9 @@ final ImagePicker _picker = ImagePicker();
 
 String _ocrRawText = '';
 List<String> _ocrLines = [];
+List<ShiftCandidate> _shiftCandidates = [];
+final TextEditingController _nameController =
+    TextEditingController();
 
   String _formatDate(DateTime date) {
     return '${date.year}/${date.month.toString().padLeft(2, '0')}/${date.day.toString().padLeft(2, '0')}';
@@ -126,8 +141,20 @@ List<String> _ocrLines = [];
   try {
     debugPrint('OCR開始');
 
-    final InputImage inputImage =
-        InputImage.fromFilePath(imageFile.path);
+    final Uint8List rawBytes =
+    await imageFile.readAsBytes();
+
+final Uint8List processedBytes =
+    await _preprocessImage(rawBytes);
+
+final File processedFile = File(
+  '${Directory.systemTemp.path}/processed_ocr.jpg',
+);
+
+await processedFile.writeAsBytes(processedBytes);
+
+final InputImage inputImage =
+    InputImage.fromFilePath(processedFile.path);
 
     debugPrint('InputImage作成完了');
 
@@ -190,16 +217,16 @@ List<String> _ocrLines = [];
 
   ShiftData? _parseOcrText(String text) {
     final String normalized = text
-    .replaceAll('：', ':')
-    .replaceAll('．', '.')
-    .replaceAll('。', '.')
-    .replaceAll('時', ':')
-    .replaceAll('分', '')
-    .replaceAll('―', '-')
-    .replaceAll('〜', '-')
-    .replaceAll('～', '-')
-    .replaceAll('–', '-')
-    .replaceAll('ー', '-');
+        .replaceAll('：', ':')
+        .replaceAll('．', '.')
+        .replaceAll('。', '.')
+        .replaceAll('時', ':')
+        .replaceAll('分', '')
+        .replaceAll('―', '-')
+        .replaceAll('〜', '-')
+        .replaceAll('～', '-')
+        .replaceAll('–', '-')
+        .replaceAll('ー', '-');
 
     final List<String> lines = normalized
         .split(RegExp(r'[\r\n]+'))
@@ -207,30 +234,68 @@ List<String> _ocrLines = [];
         .where((line) => line.isNotEmpty)
         .toList();
 
+    final String targetName = _nameController.text.trim();
+    final RegExp timeRegex = RegExp(r'([0-2]?\d)[\:：\.\s]?([0-5]\d)');
+
     String name = '';
     String startTime = '';
     String endTime = '';
-    final RegExp timeRegex =
-    RegExp(r'(\d{1,2})[:：.\s]?(\d{2})');
 
-    for (final line in lines) {
-      final matches = timeRegex.allMatches(line).toList();
-      if (matches.length >= 2) {
-        startTime = '${matches[0].group(1)!.padLeft(2, '0')}:${matches[0].group(2)!}';
-        endTime = '${matches[1].group(1)!.padLeft(2, '0')}:${matches[1].group(2)!}';
-        name = line.replaceAll(timeRegex, '').replaceAll(RegExp(r'[-\s〜～–]+'), ' ').trim();
-        break;
+    // ユーザーが名前を入力している場合、その名前から後ろ15～20行を対象にする
+    if (targetName.isNotEmpty) {
+      // 名前が含まれる行を探す
+      int nameLineIndex = -1;
+      for (int i = 0; i < lines.length; i++) {
+        if (lines[i].contains(targetName)) {
+          nameLineIndex = i;
+          name = targetName;
+          debugPrint('名前が見つかった行 (index=$i): ${lines[i]}');
+          break;
+        }
+      }
+
+      // 名前が見つかった場合、その後ろ15～20行を対象にして時刻を抽出
+      if (nameLineIndex != -1) {
+        final int endIndex = (nameLineIndex + 20 < lines.length)
+            ? nameLineIndex + 20
+            : lines.length;
+        final List<String> targetLines =
+            lines.sublist(nameLineIndex + 1, endIndex);
+
+        debugPrint(
+            '対象行の範囲: ${nameLineIndex + 1} ～ ${endIndex - 1} (${targetLines.length}行)');
+
+        // 対象範囲から時刻パターンを抽出
+        final String targetText = targetLines.join(' ');
+        final List<Match> matches = timeRegex.allMatches(targetText).toList();
+
+        if (matches.length >= 2) {
+          startTime =
+              '${matches.first.group(1)!.padLeft(2, '0')}:${matches.first.group(2)!}';
+          endTime =
+              '${matches.last.group(1)!.padLeft(2, '0')}:${matches.last.group(2)!}';
+
+          debugPrint('開始: $startTime');
+          debugPrint('終了: $endTime');
+        }
       }
     }
 
+    // 名前が見つからない場合、全文から最初と最後の時刻を抽出
     if (startTime.isEmpty || endTime.isEmpty) {
       final matches = timeRegex.allMatches(normalized).toList();
       if (matches.length >= 2) {
-        startTime = '${matches[0].group(1)!.padLeft(2, '0')}:${matches[0].group(2)!}';
-        endTime = '${matches[1].group(1)!.padLeft(2, '0')}:${matches[1].group(2)!}';
+        startTime =
+            '${matches.first.group(1)!.padLeft(2, '0')}:${matches.first.group(2)!}';
+        endTime =
+            '${matches.last.group(1)!.padLeft(2, '0')}:${matches.last.group(2)!}';
+
+        debugPrint('開始 (全文): $startTime');
+        debugPrint('終了 (全文): $endTime');
       }
     }
 
+    // 名前がまだ取得できていない場合、時刻以外の最初の行から取得
     if (name.isEmpty) {
       final String? nameLine = lines.firstWhere(
         (line) => !timeRegex.hasMatch(line) && line.isNotEmpty,
@@ -248,11 +313,11 @@ List<String> _ocrLines = [];
     }
 
     if (startTime.isEmpty || endTime.isEmpty) {
-  debugPrint('OCR解析失敗');
-  debugPrint(normalized);
+      debugPrint('OCR解析失敗');
+      debugPrint(normalized);
 
-  return null;
-}
+      return null;
+    }
 
     return ShiftData(name: name, startTime: startTime, endTime: endTime);
   }
@@ -382,7 +447,8 @@ List<String> _ocrLines = [];
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
+    return SingleChildScrollView(
+  child: Padding(
       padding: const EdgeInsets.all(16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -391,7 +457,17 @@ List<String> _ocrLines = [];
             'シフト入力',
             style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
           ),
-          const SizedBox(height: 16),
+TextField(
+  controller: _nameController,
+  decoration: const InputDecoration(
+    labelText: '名前を入力',
+  ),
+  onChanged: (value) {
+    debugPrint('入力値: $value');
+  },
+),
+
+const SizedBox(height: 12),
           if (_isOcrProcessing) ...[
             const LinearProgressIndicator(),
             const SizedBox(height: 12),
@@ -492,7 +568,10 @@ ExpansionTile(
           const SizedBox(height: 8),
 
           Container(
-            width: double.infinity,
+  width: double.infinity,
+  constraints: const BoxConstraints(
+    maxHeight: 250,
+  ),
             padding: const EdgeInsets.all(12),
             color: Colors.grey.shade200,
             child: SelectableText(_ocrRawText),
@@ -525,6 +604,7 @@ ExpansionTile(
 ),
         ],
       ),
-    );
+    ),
+);  
   }
 }
