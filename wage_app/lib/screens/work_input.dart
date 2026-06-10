@@ -1,5 +1,4 @@
-import 'dart:io';
-import 'dart:typed_data';
+﻿import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:image/image.dart' as image_lib;
@@ -7,25 +6,13 @@ import 'package:image_picker/image_picker.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:flutter/services.dart';
 
-class ShiftData {
-  final String name;
-  final String startTime;
-  final String endTime;
-
-  ShiftData({
-    required this.name,
-    required this.startTime,
-    required this.endTime,
-  });
-}
-
 class ShiftCandidate {
-  final String line;
+  final DateTime date;
   final String startTime;
   final String endTime;
 
-  ShiftCandidate({
-    required this.line,
+  const ShiftCandidate({
+    required this.date,
     required this.startTime,
     required this.endTime,
   });
@@ -33,13 +20,12 @@ class ShiftCandidate {
 
 class WorkInput extends StatefulWidget {
   final List<Map<String, dynamic>> workplaces;
-  final void Function(DateTime date, int workplaceId, TimeOfDay startTime, TimeOfDay endTime)
-      onSaveShift;
+  final void Function(List<ShiftCandidate> candidates, int workplaceId) onSaveShiftCandidates;
 
   const WorkInput({
     super.key,
     required this.workplaces,
-    required this.onSaveShift,
+    required this.onSaveShiftCandidates,
   });
 
   @override
@@ -47,564 +33,314 @@ class WorkInput extends StatefulWidget {
 }
 
 class _WorkInputState extends State<WorkInput> {
-  DateTime? _selectedDate;
-  TimeOfDay? _selectedStartTime;
-  TimeOfDay? _selectedEndTime;
+  static const double _minimumSelectionHeight = 120.0;
+
+  final ImagePicker _picker = ImagePicker();
+  final TextRecognizer _textRecognizer = TextRecognizer();
+
+  DateTime _selectedMonth = DateTime(DateTime.now().year, DateTime.now().month);
+  int _startDay = 1;
   int? _selectedWorkplaceId;
   bool _isOcrProcessing = false;
-final ImagePicker _picker = ImagePicker();
 
-String _ocrRawText = '';
-List<String> _ocrLines = [];
-List<ShiftCandidate> _shiftCandidates = [];
-final TextEditingController _nameController =
-    TextEditingController();
+  String? _selectedImagePath;
+  Uint8List? _selectedImageBytes;
+  double _imageAspectRatio = 1.0;
 
-  String _formatDate(DateTime date) {
-    return '${date.year}/${date.month.toString().padLeft(2, '0')}/${date.day.toString().padLeft(2, '0')}';
-  }
+  double? _selectionStartY;
+  double? _selectionEndY;
+  String _ocrRawText = '';
+  List<ShiftCandidate> _shiftCandidates = [];
 
-  String _formatTime(TimeOfDay time) {
-    return '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
-  }
+  static final RegExp _timePattern = RegExp(r'(?<!\d)(?:[01]?\d|2[0-3])[:.\- ]?[0-5]\d\b');
 
-  List<TimeOfDay> _generateTimeOptions() {
-    final List<TimeOfDay> times = [];
-    for (int hour = 0; hour < 24; hour++) {
-      for (int minute = 0; minute < 60; minute += 15) {
-        times.add(TimeOfDay(hour: hour, minute: minute));
-      }
-    }
-    return times;
-  }
-
-  Future<void> _startOcrFlow() async {
-  try {
-    setState(() {
-      _isOcrProcessing = true;
-    });
-
-    debugPrint('assets画像読み込み開始');
-
-    final ByteData data =
-        await rootBundle.load('assets/images/test.png');
-
-    final Uint8List bytes = data.buffer.asUint8List();
-
-    final File tempFile = File(
-      '${Directory.systemTemp.path}/ocr_test.png',
-    );
-
-    await tempFile.writeAsBytes(bytes);
-
-    debugPrint('assets画像保存完了');
-
-    final XFile imageFile = XFile(tempFile.path);
-
-    final ShiftData? ocrResult =
-        await _performOcrFromImage(imageFile);
-
-    if (ocrResult == null) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('OCRで文字を認識できませんでした'),
+  Future<void> _pickImage() async {
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      builder: (context) {
+        return SafeArea(
+          child: Wrap(
+            children: [
+              ListTile(leading: const Icon(Icons.photo_library), title: const Text('ギャラリーを開く'), onTap: () => Navigator.pop(context, ImageSource.gallery)),
+              ListTile(leading: const Icon(Icons.camera_alt), title: const Text('カメラを開く'), onTap: () => Navigator.pop(context, ImageSource.camera)),
+            ],
           ),
         );
-      }
-      return;
-    }
+      },
+    );
 
-    if (mounted) {
-      await _showOcrConfirmationDialog(ocrResult);
-    }
-  } catch (e) {
-    debugPrint(e.toString());
+    if (source == null) return;
 
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('OCRエラー: $e'),
-        ),
-      );
-    }
-  } finally {
-    if (mounted) {
+    try {
+      final XFile? image = await _picker.pickImage(source: source, imageQuality: 100);
+      if (image == null) return;
+
+      final bytes = await image.readAsBytes();
+      final decoded = image_lib.decodeImage(bytes);
+      if (decoded == null) throw Exception('画像を読み込めませんでした');
+
       setState(() {
-        _isOcrProcessing = false;
+        _selectedImagePath = image.path;
+        _selectedImageBytes = bytes;
+        _imageAspectRatio = decoded.width / decoded.height;
+        _selectionStartY = null;
+        _selectionEndY = null;
+        _ocrRawText = '';
+        _shiftCandidates = <ShiftCandidate>[];
       });
-    }
-  }
-}
-
-  Future<ShiftData?> _performOcrFromImage(XFile imageFile) async {
-  try {
-    debugPrint('OCR開始');
-
-    final Uint8List rawBytes =
-    await imageFile.readAsBytes();
-
-final Uint8List processedBytes =
-    await _preprocessImage(rawBytes);
-
-final File processedFile = File(
-  '${Directory.systemTemp.path}/processed_ocr.jpg',
-);
-
-await processedFile.writeAsBytes(processedBytes);
-
-final InputImage inputImage =
-    InputImage.fromFilePath(processedFile.path);
-
-    debugPrint('InputImage作成完了');
-
-    final textRecognizer = TextRecognizer();
-
-    debugPrint('TextRecognizer作成完了');
-
-    final RecognizedText recognizedText =
-        await textRecognizer.processImage(inputImage);
-
-    debugPrint('OCR解析完了');
-
-    await textRecognizer.close();
-
-    final String recognized = recognizedText.text;
-
-    debugPrint('OCR全文');
-    debugPrint(recognized);
-
-    setState(() {
-      _ocrRawText = recognized;
-
-      _ocrLines = recognized
-          .split(RegExp(r'[\r\n]+'))
-          .map((e) => e.trim())
-          .where((e) => e.isNotEmpty)
-          .toList();
-    });
-
-    if (recognized.trim().isEmpty) {
-      return null;
-    }
-
-    return _parseOcrText(recognized);
-  } catch (e) {
-    debugPrint('OCR内部エラー');
-    debugPrint(e.toString());
-    rethrow;
-  }
-}
-
-  Future<Uint8List> _preprocessImage(Uint8List imageBytes) async {
-    final image_lib.Image? original = image_lib.decodeImage(imageBytes);
-    if (original == null) {
-      throw Exception('画像を読み込めませんでした。');
-    }
-
-    final image_lib.Image gray = image_lib.grayscale(original);
-    final int targetWidth = original.width < 1600 ? 1600 : original.width;
-    final image_lib.Image resized = image_lib.copyResize(gray, width: targetWidth);
-    // ガウシアンブラー: radiusをnamed引数で渡す
-    final image_lib.Image blurred = image_lib.gaussianBlur(resized, radius: 1);
-    // コントラスト強化（100がデフォルト、150で強め）
-    final image_lib.Image contrasted = image_lib.contrast(blurred, contrast: 150);
-    // 輝度ベースで二値化してノイズを減らす
-    final image_lib.Image thresholded = image_lib.luminanceThreshold(contrasted, threshold: 0.5);
-
-    return Uint8List.fromList(image_lib.encodeJpg(thresholded, quality: 95));
-  }
-
-  ShiftData? _parseOcrText(String text) {
-    final String normalized = text
-        .replaceAll('：', ':')
-        .replaceAll('．', '.')
-        .replaceAll('。', '.')
-        .replaceAll('時', ':')
-        .replaceAll('分', '')
-        .replaceAll('―', '-')
-        .replaceAll('〜', '-')
-        .replaceAll('～', '-')
-        .replaceAll('–', '-')
-        .replaceAll('ー', '-');
-
-    final List<String> lines = normalized
-        .split(RegExp(r'[\r\n]+'))
-        .map((line) => line.trim())
-        .where((line) => line.isNotEmpty)
-        .toList();
-
-    final String targetName = _nameController.text.trim();
-    final RegExp timeRegex = RegExp(r'([0-2]?\d)[\:：\.\s]?([0-5]\d)');
-
-    String name = '';
-    String startTime = '';
-    String endTime = '';
-
-    // ユーザーが名前を入力している場合、その名前から後ろ15～20行を対象にする
-    if (targetName.isNotEmpty) {
-      // 名前が含まれる行を探す
-      int nameLineIndex = -1;
-      for (int i = 0; i < lines.length; i++) {
-        if (lines[i].contains(targetName)) {
-          nameLineIndex = i;
-          name = targetName;
-          debugPrint('名前が見つかった行 (index=$i): ${lines[i]}');
-          break;
-        }
-      }
-
-      // 名前が見つかった場合、その後ろ15～20行を対象にして時刻を抽出
-      if (nameLineIndex != -1) {
-        final int endIndex = (nameLineIndex + 20 < lines.length)
-            ? nameLineIndex + 20
-            : lines.length;
-        final List<String> targetLines =
-            lines.sublist(nameLineIndex + 1, endIndex);
-
-        debugPrint(
-            '対象行の範囲: ${nameLineIndex + 1} ～ ${endIndex - 1} (${targetLines.length}行)');
-
-        // 対象範囲から時刻パターンを抽出
-        final String targetText = targetLines.join(' ');
-        final List<Match> matches = timeRegex.allMatches(targetText).toList();
-
-        if (matches.length >= 2) {
-          startTime =
-              '${matches.first.group(1)!.padLeft(2, '0')}:${matches.first.group(2)!}';
-          endTime =
-              '${matches.last.group(1)!.padLeft(2, '0')}:${matches.last.group(2)!}';
-
-          debugPrint('開始: $startTime');
-          debugPrint('終了: $endTime');
-        }
-      }
-    }
-
-    // 名前が見つからない場合、全文から最初と最後の時刻を抽出
-    if (startTime.isEmpty || endTime.isEmpty) {
-      final matches = timeRegex.allMatches(normalized).toList();
-      if (matches.length >= 2) {
-        startTime =
-            '${matches.first.group(1)!.padLeft(2, '0')}:${matches.first.group(2)!}';
-        endTime =
-            '${matches.last.group(1)!.padLeft(2, '0')}:${matches.last.group(2)!}';
-
-        debugPrint('開始 (全文): $startTime');
-        debugPrint('終了 (全文): $endTime');
-      }
-    }
-
-    // 名前がまだ取得できていない場合、時刻以外の最初の行から取得
-    if (name.isEmpty) {
-      final String? nameLine = lines.firstWhere(
-        (line) => !timeRegex.hasMatch(line) && line.isNotEmpty,
-        orElse: () => '',
-      );
-      if (nameLine != null && nameLine.isNotEmpty) {
-        name = nameLine
-            .replaceAll(RegExp(r'氏名|名前|Name|name|出勤|退勤|開始|終了|:|：'), '')
-            .trim();
-      }
-    }
-
-    if (name.isEmpty) {
-      name = '認識できませんでした';
-    }
-
-    if (startTime.isEmpty || endTime.isEmpty) {
-      debugPrint('OCR解析失敗');
-      debugPrint(normalized);
-
-      return null;
-    }
-
-    return ShiftData(name: name, startTime: startTime, endTime: endTime);
-  }
-
-  TimeOfDay? _parseTimeOfDay(String timeText) {
-    final RegExp matchTime = RegExp(r'(\d{1,2})[:](\d{2})');
-    final RegExpMatch? match = matchTime.firstMatch(timeText);
-    if (match == null) {
-      return null;
-    }
-    final int? hour = int.tryParse(match.group(1)!);
-    final int? minute = int.tryParse(match.group(2)!);
-    if (hour == null || minute == null || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
-      return null;
-    }
-    return TimeOfDay(hour: hour, minute: minute);
-  }
-
-  Future<void> _showOcrConfirmationDialog(ShiftData result) async {
-    final bool confirmed = await showDialog<bool>(
-          context: context,
-          builder: (context) {
-            return AlertDialog(
-              title: const Text('OCR結果を確認'),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('名前: ${result.name}'),
-                  const SizedBox(height: 8),
-                  Text('開始時刻: ${result.startTime}'),
-                  const SizedBox(height: 8),
-                  Text('終了時刻: ${result.endTime}'),
-                  const SizedBox(height: 16),
-                  const Text('この情報をフォームに反映しますか？'),
-                ],
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(context, false),
-                  child: const Text('キャンセル'),
-                ),
-                TextButton(
-                  onPressed: () => Navigator.pop(context, true),
-                  child: const Text('反映する'),
-                ),
-              ],
-            );
-          },
-        ) ??
-        false;
-
-    if (!confirmed) {
-      return;
-    }
-
-    final TimeOfDay? start = _parseTimeOfDay(result.startTime);
-    final TimeOfDay? end = _parseTimeOfDay(result.endTime);
-    if (start == null || end == null) {
+    } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('OCR結果の時刻を解析できませんでした。')),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('画像の読み込みに失敗しました: $e')));
       }
-      return;
-    }
-
-    setState(() {
-      _selectedDate = _selectedDate ?? DateTime.now();
-      _selectedStartTime = start;
-      _selectedEndTime = end;
-    });
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('OCR結果をフォームに反映しました。勤務先を選択して保存してください。')),
-      );
     }
   }
 
-  Future<void> _pickDate() async {
-    final now = DateTime.now();
-    final picked = await showDatePicker(
-      context: context,
-      initialDate: _selectedDate ?? now,
-      firstDate: DateTime(now.year - 1, 1, 1),
-      lastDate: DateTime(now.year + 1, 12, 31),
-    );
-    if (picked != null) {
+  Future<void> _runOcrOnSelection() async {
+    if (_selectedImagePath == null || _selectedImageBytes == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('先にシフト表画像を選択してください。')));
+      return;
+    }
+
+    if (_selectionStartY == null || _selectionEndY == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('選択範囲をタップまたはドラッグしてください。')));
+      return;
+    }
+
+    if (_selectedWorkplaceId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('勤務先を選択してください。')));
+      return;
+    }
+
+    setState(() => _isOcrProcessing = true);
+
+    try {
+      final decoded = image_lib.decodeImage(_selectedImageBytes!);
+      if (decoded == null) throw Exception('画像をデコードできませんでした');
+
+      final previewHeight = (MediaQuery.of(context).size.width / _imageAspectRatio).clamp(180.0, 420.0);
+      debugPrint('OCR対象画像 size=${decoded.width}x${decoded.height}, previewHeight=$previewHeight');
+
+      final startY = (_selectionStartY! / previewHeight * decoded.height).round();
+      final endY = (_selectionEndY! / previewHeight * decoded.height).round();
+      final safeStartY = startY.clamp(0, decoded.height - 1);
+      final safeEndY = endY.clamp(1, decoded.height);
+      final cropStart = safeStartY < safeEndY ? safeStartY : safeEndY;
+      final cropEnd = safeStartY < safeEndY ? safeEndY : safeStartY;
+      final maxCropHeight = decoded.height - cropStart;
+      final cropHeight = (cropEnd - cropStart).clamp(32, maxCropHeight < 32 ? 32 : maxCropHeight);
+
+      debugPrint('切り出し範囲 cropStart=$cropStart, cropEnd=$cropEnd, cropHeight=$cropHeight, width=${decoded.width}');
+
+      if (decoded.width < 32 || maxCropHeight < 32 || cropHeight < 32 || cropStart < 0 || cropEnd > decoded.height) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('切り出し画像が小さすぎるためOCRできません。選択範囲を広げてください。')),
+          );
+        }
+        return;
+      }
+
+      final cropped = image_lib.copyCrop(
+        decoded,
+        x: 0,
+        y: cropStart,
+        width: decoded.width,
+        height: cropHeight,
+      );
+      debugPrint('切り出し後 size=${cropped.width}x${cropped.height}');
+
+      if (cropped.width < 32 || cropped.height < 32) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('切り出した画像がMLKitの最小サイズ未満です。')),
+          );
+        }
+        return;
+      }
+
+      final croppedBytes = Uint8List.fromList(image_lib.encodeJpg(cropped, quality: 95));
+      final tempFile = File('${Directory.systemTemp.path}/shift_crop_${DateTime.now().millisecondsSinceEpoch}.jpg');
+      await tempFile.writeAsBytes(croppedBytes);
+
+      final inputImage = InputImage.fromFilePath(tempFile.path);
+      final recognized = await _textRecognizer.processImage(inputImage);
+      final text = recognized.text.trim();
+      final times = _extractTimeTokens(text);
+
+      if (times.length < 2) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('OCR結果から時刻を抽出できませんでした。')));
+        }
+        return;
+      }
+
+      final candidates = <ShiftCandidate>[];
+      for (var i = 0; i < times.length - 1; i += 2) {
+        candidates.add(ShiftCandidate(
+          date: DateTime(_selectedMonth.year, _selectedMonth.month, _startDay + (i ~/ 2)),
+          startTime: times[i],
+          endTime: times[i + 1],
+        ));
+      }
+
       setState(() {
-        _selectedDate = picked;
+        _ocrRawText = text;
+        _shiftCandidates = candidates;
       });
+
+      if (mounted) {
+        await _showCandidateReviewDialog(candidates);
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('OCR処理でエラーが発生しました: $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _isOcrProcessing = false);
     }
   }
 
-  void _saveShift() {
-    if (_selectedDate == null ||
-        _selectedWorkplaceId == null ||
-        _selectedStartTime == null ||
-        _selectedEndTime == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('すべての項目を正しく入力してください。')),
-      );
-      return;
+  List<String> _extractTimeTokens(String text) {
+    final matches = _timePattern.allMatches(text).toList();
+    final extracted = <String>[];
+    for (final match in matches) {
+      final token = match.group(0)!.replaceAll(RegExp(r'[^0-9:]'), '');
+      final parts = token.split(':');
+      if (parts.length == 2) {
+        final hour = int.tryParse(parts[0]);
+        final minute = int.tryParse(parts[1]);
+        if (hour != null && minute != null) {
+          extracted.add('${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}');
+        }
+      }
     }
-    widget.onSaveShift(
-      _selectedDate!,
-      _selectedWorkplaceId!,
-      _selectedStartTime!,
-      _selectedEndTime!,
-    );
-    setState(() {
-      _selectedDate = null;
-      _selectedStartTime = null;
-      _selectedEndTime = null;
-      _selectedWorkplaceId = null;
+    return extracted;
+  }
+
+  Future<void> _showCandidateReviewDialog(List<ShiftCandidate> candidates) async {
+    final confirmed = await showDialog<bool>(context: context, builder: (context) {
+      return AlertDialog(
+        title: const Text('OCR候補を確認'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('対象月: ${_selectedMonth.year}年${_selectedMonth.month}月'),
+                Text('開始日: $_startDay 日'),
+                const SizedBox(height: 8),
+                Text('候補件数: ${candidates.length}件'),
+                const SizedBox(height: 12),
+                ...candidates.map((candidate) => ListTile(dense: true, title: Text('${candidate.date.month}/${candidate.date.day}  ${candidate.startTime} - ${candidate.endTime}'))),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('キャンセル')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('この候補を保存')),
+        ],
+      );
     });
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('シフトを保存しました。')),
-    );
+
+    if (confirmed == true) {
+      widget.onSaveShiftCandidates(candidates, _selectedWorkplaceId!);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('候補を一括保存しました。')));
+      }
+    }
   }
 
   @override
   void dispose() {
+    _textRecognizer.close();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    const maxPreviewHeight = 420.0;
+    final imageHeight = _selectedImagePath != null ? MediaQuery.of(context).size.width / _imageAspectRatio : 0.0;
+    final previewHeight = imageHeight.clamp(180.0, maxPreviewHeight);
+    final hasSelection = _selectionStartY != null && _selectionEndY != null;
+
     return SingleChildScrollView(
-  child: Padding(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const Text(
-            'シフト入力',
-            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-          ),
-TextField(
-  controller: _nameController,
-  decoration: const InputDecoration(
-    labelText: '名前を入力',
-  ),
-  onChanged: (value) {
-    debugPrint('入力値: $value');
-  },
-),
-
-const SizedBox(height: 12),
-          if (_isOcrProcessing) ...[
-            const LinearProgressIndicator(),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text('シフト表から行を選択', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
             const SizedBox(height: 12),
-          ],
-          ElevatedButton.icon(
-            onPressed: _isOcrProcessing ? null : _startOcrFlow,
-            icon: const Icon(Icons.image_search),
-            label: const Text('画像から読み取る'),
-          ),
-          const SizedBox(height: 12),
-          ElevatedButton(
-            onPressed: _pickDate,
-            child: Text(
-              _selectedDate == null
-                  ? '勤務日を選択'
-                  : '勤務日: ${_formatDate(_selectedDate!)}',
-            ),
-          ),
-          const SizedBox(height: 12),
-          DropdownButtonFormField<int>(
-            initialValue: _selectedWorkplaceId,
-            decoration: const InputDecoration(labelText: '勤務先を選択'),
-            items: widget.workplaces.map((place) {
-              return DropdownMenuItem<int>(
-                value: place['id'] as int,
-                child: Text('${place['name']} (¥${place['hourlyWage']})'),
-              );
-            }).toList(),
-            onChanged: (value) {
-              setState(() {
-                _selectedWorkplaceId = value;
-              });
-            },
-          ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: DropdownButtonFormField<TimeOfDay>(
-                  value: _selectedStartTime,
-                  decoration: const InputDecoration(labelText: '開始時刻'),
-                  items: _generateTimeOptions().map((time) {
-                    return DropdownMenuItem<TimeOfDay>(
-                      value: time,
-                      child: Text(_formatTime(time)),
-                    );
-                  }).toList(),
-                  onChanged: (value) {
-                    setState(() {
-                      _selectedStartTime = value;
-                    });
-                  },
-                ),
-              ),
+            Row(children: [
+              Expanded(child: DropdownButtonFormField<int>(initialValue: _selectedMonth.year, decoration: const InputDecoration(labelText: '対象年'), items: List.generate(5, (index) => DateTime.now().year - 1 + index).map((year) => DropdownMenuItem(value: year, child: Text('$year年'))).toList(), onChanged: (year) { if (year == null) return; setState(() => _selectedMonth = DateTime(year, _selectedMonth.month)); })),
               const SizedBox(width: 12),
-              Expanded(
-                child: DropdownButtonFormField<TimeOfDay>(
-                  value: _selectedEndTime,
-                  decoration: const InputDecoration(labelText: '終了時刻'),
-                  items: _generateTimeOptions().map((time) {
-                    return DropdownMenuItem<TimeOfDay>(
-                      value: time,
-                      child: Text(_formatTime(time)),
-                    );
-                  }).toList(),
-                  onChanged: (value) {
+              Expanded(child: DropdownButtonFormField<int>(initialValue: _selectedMonth.month, decoration: const InputDecoration(labelText: '対象月'), items: List.generate(12, (index) => index + 1).map((month) => DropdownMenuItem(value: month, child: Text('$month月'))).toList(), onChanged: (month) { if (month == null) return; final safeDay = _startDay > DateTime(_selectedMonth.year, month + 1, 0).day ? DateTime(_selectedMonth.year, month + 1, 0).day : _startDay; setState(() { _selectedMonth = DateTime(_selectedMonth.year, month); _startDay = safeDay; }); })),
+            ]),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<int>(initialValue: _startDay, decoration: const InputDecoration(labelText: '開始日'), items: List.generate(DateTime(_selectedMonth.year, _selectedMonth.month + 1, 0).day, (index) => index + 1).map((day) => DropdownMenuItem(value: day, child: Text('$day日'))).toList(), onChanged: (value) { if (value != null) setState(() => _startDay = value); }),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<int>(initialValue: _selectedWorkplaceId, decoration: const InputDecoration(labelText: '勤務先を選択'), items: widget.workplaces.map((place) => DropdownMenuItem<int>(value: place['id'] as int, child: Text('${place['name']} (¥${place['hourlyWage']})'))).toList(), onChanged: (value) => setState(() => _selectedWorkplaceId = value)),
+            const SizedBox(height: 12),
+            ElevatedButton.icon(onPressed: _pickImage, icon: const Icon(Icons.image), label: const Text('シフト表画像を選択')),
+            const SizedBox(height: 12),
+            if (_selectedImagePath != null) ...[
+              const Text('1行をタップまたはドラッグして選択してください', style: TextStyle(color: Colors.grey)),
+              const SizedBox(height: 8),
+              SizedBox(width: double.infinity, height: previewHeight, child: Stack(children: [
+                ClipRRect(borderRadius: BorderRadius.circular(12), child: Image.file(File(_selectedImagePath!), width: double.infinity, height: previewHeight, fit: BoxFit.contain)),
+                Positioned.fill(child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTapDown: (details) {
+                    final y = details.localPosition.dy.clamp(0.0, previewHeight);
                     setState(() {
-                      _selectedEndTime = value;
+                      _selectionStartY = y;
+                      _selectionEndY = (y + _minimumSelectionHeight).clamp(0.0, previewHeight);
                     });
                   },
-                ),
-              ),
+                  onPanStart: (details) {
+                    final y = details.localPosition.dy.clamp(0.0, previewHeight);
+                    setState(() {
+                      _selectionStartY = y;
+                      _selectionEndY = (y + _minimumSelectionHeight).clamp(0.0, previewHeight);
+                    });
+                  },
+                  onPanUpdate: (details) {
+                    final y = details.localPosition.dy.clamp(0.0, previewHeight);
+                    final start = _selectionStartY ?? y;
+                    final end = y < start ? start + _minimumSelectionHeight : y;
+                    setState(() {
+                      _selectionStartY = y < start ? y : start;
+                      _selectionEndY = end < start + _minimumSelectionHeight
+                          ? start + _minimumSelectionHeight
+                          : end;
+                    });
+                  },
+                )),
+                if (hasSelection)
+                  Positioned(left: 0, right: 0, top: _selectionStartY!.clamp(0.0, previewHeight), height: (_selectionEndY! - _selectionStartY!).abs().clamp(12.0, previewHeight), child: Container(decoration: BoxDecoration(color: Colors.blue.withValues(alpha: 0.18), border: Border.all(color: Colors.blue, width: 2), borderRadius: BorderRadius.circular(6))))
+              ])),
+              const SizedBox(height: 8),
+              Text(hasSelection ? '選択範囲: ${(_selectionStartY! / previewHeight * 100).toStringAsFixed(1)}% 〜 ${(_selectionEndY! / previewHeight * 100).toStringAsFixed(1)}%' : '選択中の行はありません', style: const TextStyle(fontSize: 12)),
+              const SizedBox(height: 12),
+              ElevatedButton.icon(onPressed: _isOcrProcessing ? null : _runOcrOnSelection, icon: _isOcrProcessing ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.text_fields), label: const Text('選択行をOCRで解析')),
             ],
-          ),
-          const SizedBox(height: 20),
-          ElevatedButton(
-            onPressed: _saveShift,
-            child: const Text('シフトを保存'),
-          ),
-          const SizedBox(height: 12),
-          const SizedBox(height: 20),
-
-ExpansionTile(
-  title: const Text('OCRデバッグ情報'),
-  children: [
-    Padding(
-      padding: const EdgeInsets.all(12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'OCR全文',
-            style: TextStyle(
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-
-          const SizedBox(height: 8),
-
-          Container(
-  width: double.infinity,
-  constraints: const BoxConstraints(
-    maxHeight: 250,
-  ),
-            padding: const EdgeInsets.all(12),
-            color: Colors.grey.shade200,
-            child: SelectableText(_ocrRawText),
-          ),
-
-          const SizedBox(height: 20),
-
-          const Text(
-            'OCR行解析',
-            style: TextStyle(
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-
-          const SizedBox(height: 8),
-
-          ..._ocrLines.map(
-            (line) => Container(
-              width: double.infinity,
-              margin: const EdgeInsets.only(bottom: 6),
-              padding: const EdgeInsets.all(8),
-              color: Colors.grey.shade100,
-              child: Text(line),
-            ),
-          ),
-        ],
+            const SizedBox(height: 16),
+            if (_ocrRawText.isNotEmpty) ...[
+              const Text('OCRテキスト', style: TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              Container(padding: const EdgeInsets.all(12), color: Colors.grey.shade100, child: SelectableText(_ocrRawText)),
+            ],
+            if (_shiftCandidates.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              const Text('生成候補', style: TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              ..._shiftCandidates.map((candidate) => Card(child: ListTile(title: Text('${candidate.date.month}/${candidate.date.day}  ${candidate.startTime} - ${candidate.endTime}')))),
+            ],
+          ],
+        ),
       ),
-    ),
-  ],
-),
-        ],
-      ),
-    ),
-);  
+    );
   }
 }

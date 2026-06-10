@@ -258,15 +258,17 @@ class _WageAppMainState extends State<WageAppMain> {
       ),
       WorkInput(
         workplaces: _workplaces,
-        onSaveShift: (date, workplaceId, startTime, endTime) {
-          _saveShift({
-            'id': _nextShiftId,
-            'date': date,
-            'workplaceId': workplaceId,
-            'start': startTime,
-            'end': endTime,
-          });
-          _nextShiftId += 1;
+        onSaveShiftCandidates: (candidates, workplaceId) {
+          for (final candidate in candidates) {
+            _saveShift({
+              'id': _nextShiftId,
+              'date': candidate.date,
+              'workplaceId': workplaceId,
+              'start': TimeOfDay(hour: int.parse(candidate.startTime.split(':')[0]), minute: int.parse(candidate.startTime.split(':')[1])),
+              'end': TimeOfDay(hour: int.parse(candidate.endTime.split(':')[0]), minute: int.parse(candidate.endTime.split(':')[1])),
+            });
+            _nextShiftId += 1;
+          }
         },
       ),
       History(
@@ -415,7 +417,7 @@ class _ShiftFormDialogState extends State<ShiftFormDialog> {
               children: [
                 Expanded(
                   child: DropdownButtonFormField<TimeOfDay>(
-                    value: _selectedStartTime,
+                    initialValue: _selectedStartTime,
                     decoration: const InputDecoration(labelText: '開始時刻'),
                     items: _generateTimeOptions().map((time) {
                       return DropdownMenuItem<TimeOfDay>(
@@ -433,7 +435,7 @@ class _ShiftFormDialogState extends State<ShiftFormDialog> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: DropdownButtonFormField<TimeOfDay>(
-                    value: _selectedEndTime,
+                    initialValue: _selectedEndTime,
                     decoration: const InputDecoration(labelText: '終了時刻'),
                     items: _generateTimeOptions().map((time) {
                       return DropdownMenuItem<TimeOfDay>(
