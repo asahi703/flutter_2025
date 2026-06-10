@@ -32,8 +32,26 @@ class WorkInput extends StatefulWidget {
   State<WorkInput> createState() => _WorkInputState();
 }
 
+class _SelectionPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..style = PaintingStyle.fill
+      ..color = Colors.blue.withValues(alpha: 0.18);
+    final border = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2
+      ..color = Colors.blue;
+    canvas.drawRect(Rect.fromLTWH(0, 0, size.width, size.height), paint);
+    canvas.drawRect(Rect.fromLTWH(0, 0, size.width, size.height), border);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+}
+
 class _WorkInputState extends State<WorkInput> {
-  static const double _minimumSelectionHeight = 120.0;
+  static const double _minimumSelectionHeight = 36.0;
 
   final ImagePicker _picker = ImagePicker();
   final TextRecognizer _textRecognizer = TextRecognizer();
@@ -46,13 +64,53 @@ class _WorkInputState extends State<WorkInput> {
   String? _selectedImagePath;
   Uint8List? _selectedImageBytes;
   double _imageAspectRatio = 1.0;
+  double _viewerScale = 1.0;
 
-  double? _selectionStartY;
-  double? _selectionEndY;
+  Rect _selectedRect = Rect.zero;
   String _ocrRawText = '';
+  List<String> _debugExtractedTimes = <String>[];
   List<ShiftCandidate> _shiftCandidates = [];
 
   static final RegExp _timePattern = RegExp(r'(?<!\d)(?:[01]?\d|2[0-3])[:.\- ]?[0-5]\d\b');
+
+  Rect _normalizeRect(Rect rect) {
+    final left = rect.left < rect.right ? rect.left : rect.right;
+    final top = rect.top < rect.bottom ? rect.top : rect.bottom;
+    final right = rect.left < rect.right ? rect.right : rect.left;
+    final bottom = rect.top < rect.bottom ? rect.bottom : rect.top;
+    return Rect.fromLTRB(left, top, right, bottom);
+  }
+
+  List<String> _dedupeConsecutiveTimes(List<String> times) {
+    final result = <String>[];
+    for (final time in times) {
+      if (result.isEmpty || result.last != time) {
+        result.add(time);
+      }
+    }
+    return result;
+  }
+
+  int _durationHours(String start, String end) {
+    final startMinutes = _toMinutes(start);
+    final endMinutes = _toMinutes(end);
+    final adjustedEnd = endMinutes < startMinutes ? endMinutes + 24 * 60 : endMinutes;
+    return ((adjustedEnd - startMinutes) / 60).round();
+  }
+
+  int _toMinutes(String time) {
+    final parts = time.split(':');
+    final h = int.tryParse(parts[0]) ?? 0;
+    final m = int.tryParse(parts[1]) ?? 0;
+    return h * 60 + m;
+  }
+
+  String _formatTime(String time) {
+    final parts = time.split(':');
+    final h = int.tryParse(parts[0]) ?? 0;
+    final m = int.tryParse(parts[1]) ?? 0;
+    return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}';
+  }
 
   Future<void> _pickImage() async {
     final source = await showModalBottomSheet<ImageSource>(
@@ -83,9 +141,9 @@ class _WorkInputState extends State<WorkInput> {
         _selectedImagePath = image.path;
         _selectedImageBytes = bytes;
         _imageAspectRatio = decoded.width / decoded.height;
-        _selectionStartY = null;
-        _selectionEndY = null;
+        _selectedRect = Rect.zero;
         _ocrRawText = '';
+        _debugExtractedTimes = <String>[];
         _shiftCandidates = <ShiftCandidate>[];
       });
     } catch (e) {
@@ -101,8 +159,9 @@ class _WorkInputState extends State<WorkInput> {
       return;
     }
 
-    if (_selectionStartY == null || _selectionEndY == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('選択範囲をタップまたはドラッグしてください。')));
+    final rect = _normalizeRect(_selectedRect);
+    if (rect.width <= 0 || rect.height <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('矩形選択範囲を指定してください。')));
       return;
     }
 
@@ -117,21 +176,28 @@ class _WorkInputState extends State<WorkInput> {
       final decoded = image_lib.decodeImage(_selectedImageBytes!);
       if (decoded == null) throw Exception('画像をデコードできませんでした');
 
-      final previewHeight = (MediaQuery.of(context).size.width / _imageAspectRatio).clamp(180.0, 420.0);
-      debugPrint('OCR対象画像 size=${decoded.width}x${decoded.height}, previewHeight=$previewHeight');
+      final previewWidth = MediaQuery.of(context).size.width - 32.0;
+      final previewHeight = (previewWidth / _imageAspectRatio).clamp(180.0, 420.0);
+      final visibleWidth = previewWidth * _viewerScale;
+      final visibleHeight = previewHeight * _viewerScale;
+      final scaleX = visibleWidth > 0 ? decoded.width / visibleWidth : 1.0;
+      final scaleY = visibleHeight > 0 ? decoded.height / visibleHeight : 1.0;
+      final cropRect = Rect.fromLTRB(
+        (rect.left * scaleX).round().clamp(0, decoded.width - 1).toDouble(),
+        (rect.top * scaleY).round().clamp(0, decoded.height - 1).toDouble(),
+        (rect.right * scaleX).round().clamp(1, decoded.width).toDouble(),
+        (rect.bottom * scaleY).round().clamp(1, decoded.height).toDouble(),
+      );
+      final cropStartX = cropRect.left.toInt();
+      final cropEndX = cropRect.right.toInt();
+      final cropStartY = cropRect.top.toInt();
+      final cropEndY = cropRect.bottom.toInt();
+      final cropWidth = (cropEndX - cropStartX).clamp(32, decoded.width - cropStartX);
+      final cropHeight = (cropEndY - cropStartY).clamp(32, decoded.height - cropStartY);
 
-      final startY = (_selectionStartY! / previewHeight * decoded.height).round();
-      final endY = (_selectionEndY! / previewHeight * decoded.height).round();
-      final safeStartY = startY.clamp(0, decoded.height - 1);
-      final safeEndY = endY.clamp(1, decoded.height);
-      final cropStart = safeStartY < safeEndY ? safeStartY : safeEndY;
-      final cropEnd = safeStartY < safeEndY ? safeEndY : safeStartY;
-      final maxCropHeight = decoded.height - cropStart;
-      final cropHeight = (cropEnd - cropStart).clamp(32, maxCropHeight < 32 ? 32 : maxCropHeight);
+      debugPrint('OCR対象画像 size=${decoded.width}x${decoded.height}, preview=${previewWidth.toStringAsFixed(1)}x${previewHeight.toStringAsFixed(1)}, scale=$_viewerScale, rect=($cropStartX,$cropStartY,$cropWidth,$cropHeight)');
 
-      debugPrint('切り出し範囲 cropStart=$cropStart, cropEnd=$cropEnd, cropHeight=$cropHeight, width=${decoded.width}');
-
-      if (decoded.width < 32 || maxCropHeight < 32 || cropHeight < 32 || cropStart < 0 || cropEnd > decoded.height) {
+      if (decoded.width < 32 || decoded.height < 32 || cropWidth < 32 || cropHeight < 32 || cropStartX < 0 || cropEndX > decoded.width || cropStartY < 0 || cropEndY > decoded.height) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('切り出し画像が小さすぎるためOCRできません。選択範囲を広げてください。')),
@@ -142,9 +208,9 @@ class _WorkInputState extends State<WorkInput> {
 
       final cropped = image_lib.copyCrop(
         decoded,
-        x: 0,
-        y: cropStart,
-        width: decoded.width,
+        x: cropStartX,
+        y: cropStartY,
+        width: cropWidth,
         height: cropHeight,
       );
       debugPrint('切り出し後 size=${cropped.width}x${cropped.height}');
@@ -165,7 +231,8 @@ class _WorkInputState extends State<WorkInput> {
       final inputImage = InputImage.fromFilePath(tempFile.path);
       final recognized = await _textRecognizer.processImage(inputImage);
       final text = recognized.text.trim();
-      final times = _extractTimeTokens(text);
+      final times = _dedupeConsecutiveTimes(_extractTimeTokens(text));
+      _debugExtractedTimes = List<String>.from(times);
 
       if (times.length < 2) {
         if (mounted) {
@@ -175,16 +242,27 @@ class _WorkInputState extends State<WorkInput> {
       }
 
       final candidates = <ShiftCandidate>[];
-      for (var i = 0; i < times.length - 1; i += 2) {
+      for (var i = 0; i + 1 < times.length; i += 2) {
+        final startTime = _formatTime(times[i]);
+        final endTime = _formatTime(times[i + 1]);
+        final duration = _durationHours(startTime, endTime);
+        final isNightShift = _toMinutes(startTime) > _toMinutes(endTime);
+        final warning = isNightShift && duration >= 12
+            ? '夜勤候補: $duration時間と長めです。OCR誤認識の可能性があります。'
+            : null;
         candidates.add(ShiftCandidate(
           date: DateTime(_selectedMonth.year, _selectedMonth.month, _startDay + (i ~/ 2)),
-          startTime: times[i],
-          endTime: times[i + 1],
+          startTime: startTime,
+          endTime: endTime,
         ));
+        if (warning != null) {
+          debugPrint('OCR警告: $warning');
+        }
       }
 
       setState(() {
         _ocrRawText = text;
+        _debugExtractedTimes = List<String>.from(times);
         _shiftCandidates = candidates;
       });
 
@@ -218,38 +296,95 @@ class _WorkInputState extends State<WorkInput> {
   }
 
   Future<void> _showCandidateReviewDialog(List<ShiftCandidate> candidates) async {
+    final selected = List<bool>.filled(candidates.length, true);
+    final editableCandidates = List<ShiftCandidate>.from(candidates);
+
     final confirmed = await showDialog<bool>(context: context, builder: (context) {
       return AlertDialog(
         title: const Text('OCR候補を確認'),
         content: SizedBox(
           width: double.maxFinite,
-          child: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('対象月: ${_selectedMonth.year}年${_selectedMonth.month}月'),
-                Text('開始日: $_startDay 日'),
-                const SizedBox(height: 8),
-                Text('候補件数: ${candidates.length}件'),
-                const SizedBox(height: 12),
-                ...candidates.map((candidate) => ListTile(dense: true, title: Text('${candidate.date.month}/${candidate.date.day}  ${candidate.startTime} - ${candidate.endTime}'))),
-              ],
-            ),
-          ),
+          child: StatefulBuilder(builder: (context, setDialogState) {
+            return SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('対象月: ${_selectedMonth.year}年${_selectedMonth.month}月'),
+                  Text('開始日: $_startDay 日'),
+                  const SizedBox(height: 8),
+                  Text('候補件数: ${editableCandidates.length}件'),
+                  const SizedBox(height: 12),
+                  const Text('OCR生データ', style: TextStyle(fontWeight: FontWeight.w600)),
+                  Text('raw: ${_ocrRawText.isEmpty ? '(なし)' : _ocrRawText}'),
+                  const SizedBox(height: 8),
+                  Text('抽出時刻: ${_debugExtractedTimes.isEmpty ? '(なし)' : _debugExtractedTimes.join(', ')}'),
+                  const SizedBox(height: 12),
+                  ...List.generate(editableCandidates.length, (index) {
+                    final candidate = editableCandidates[index];
+                    return ListTile(
+                      leading: Checkbox(
+                        value: selected[index],
+                        onChanged: (value) => setDialogState(() => selected[index] = value ?? false),
+                      ),
+                      title: Text('${candidate.date.month}/${candidate.date.day}  ${candidate.startTime} - ${candidate.endTime}'),
+                      subtitle: _durationHours(candidate.startTime, candidate.endTime) >= 12
+                          ? const Text('夜勤候補として判定されました。OCR誤認識の可能性があります。')
+                          : null,
+                      onTap: () async {
+                        final edited = await _editCandidate(candidate);
+                        if (edited != null) {
+                          editableCandidates[index] = edited;
+                          setDialogState(() {});
+                        }
+                      },
+                    );
+                  }),
+                ],
+              ),
+            );
+          }),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('キャンセル')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('この候補を保存')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('保存')),
         ],
       );
     });
 
     if (confirmed == true) {
-      widget.onSaveShiftCandidates(candidates, _selectedWorkplaceId!);
+      final saved = <ShiftCandidate>[];
+      for (var i = 0; i < editableCandidates.length; i++) {
+        if (selected[i]) saved.add(editableCandidates[i]);
+      }
+      widget.onSaveShiftCandidates(saved, _selectedWorkplaceId!);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('候補を一括保存しました。')));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('チェックした候補を保存しました: ${saved.length}件')));
       }
     }
+  }
+
+  Future<ShiftCandidate?> _editCandidate(ShiftCandidate candidate) async {
+    final startController = TextEditingController(text: candidate.startTime);
+    final endController = TextEditingController(text: candidate.endTime);
+
+    final result = await showDialog<ShiftCandidate?>(context: context, builder: (context) {
+      return AlertDialog(
+        title: const Text('候補を編集'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(controller: startController, decoration: const InputDecoration(labelText: '開始時刻 (HH:mm)')),
+          const SizedBox(height: 8),
+          TextField(controller: endController, decoration: const InputDecoration(labelText: '終了時刻 (HH:mm)')),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, null), child: const Text('キャンセル')),
+          FilledButton(onPressed: () => Navigator.pop(context, ShiftCandidate(date: candidate.date, startTime: _formatTime(startController.text), endTime: _formatTime(endController.text))), child: const Text('保存')),
+        ],
+      );
+    });
+
+    startController.dispose();
+    endController.dispose();
+    return result;
   }
 
   @override
@@ -263,7 +398,7 @@ class _WorkInputState extends State<WorkInput> {
     const maxPreviewHeight = 420.0;
     final imageHeight = _selectedImagePath != null ? MediaQuery.of(context).size.width / _imageAspectRatio : 0.0;
     final previewHeight = imageHeight.clamp(180.0, maxPreviewHeight);
-    final hasSelection = _selectionStartY != null && _selectionEndY != null;
+    final hasSelection = _selectedRect.width > 0 && _selectedRect.height > 0;
 
     return SingleChildScrollView(
       child: Padding(
@@ -271,7 +406,7 @@ class _WorkInputState extends State<WorkInput> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text('シフト表から行を選択', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+            const Text('シフト表から矩形を選択', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
             const SizedBox(height: 12),
             Row(children: [
               Expanded(child: DropdownButtonFormField<int>(initialValue: _selectedMonth.year, decoration: const InputDecoration(labelText: '対象年'), items: List.generate(5, (index) => DateTime.now().year - 1 + index).map((year) => DropdownMenuItem(value: year, child: Text('$year年'))).toList(), onChanged: (year) { if (year == null) return; setState(() => _selectedMonth = DateTime(year, _selectedMonth.month)); })),
@@ -286,55 +421,163 @@ class _WorkInputState extends State<WorkInput> {
             ElevatedButton.icon(onPressed: _pickImage, icon: const Icon(Icons.image), label: const Text('シフト表画像を選択')),
             const SizedBox(height: 12),
             if (_selectedImagePath != null) ...[
-              const Text('1行をタップまたはドラッグして選択してください', style: TextStyle(color: Colors.grey)),
+              const Text('矩形をドラッグしてOCR対象範囲を指定してください', style: TextStyle(color: Colors.grey)),
               const SizedBox(height: 8),
-              SizedBox(width: double.infinity, height: previewHeight, child: Stack(children: [
-                ClipRRect(borderRadius: BorderRadius.circular(12), child: Image.file(File(_selectedImagePath!), width: double.infinity, height: previewHeight, fit: BoxFit.contain)),
-                Positioned.fill(child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTapDown: (details) {
-                    final y = details.localPosition.dy.clamp(0.0, previewHeight);
-                    setState(() {
-                      _selectionStartY = y;
-                      _selectionEndY = (y + _minimumSelectionHeight).clamp(0.0, previewHeight);
-                    });
+              SizedBox(
+                width: double.infinity,
+                height: previewHeight,
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final availableWidth = constraints.maxWidth;
+                    final previewHeightForLayout = (availableWidth / _imageAspectRatio).clamp(180.0, 420.0);
+                    final hasSelection = _selectedRect.width > 0 && _selectedRect.height > 0;
+
+                    return InteractiveViewer(
+                      minScale: 1.0,
+                      maxScale: 4.0,
+                      boundaryMargin: const EdgeInsets.all(8),
+                      onInteractionUpdate: (details) {
+                        setState(() => _viewerScale = details.scale.clamp(1.0, 4.0));
+                      },
+                      child: Stack(
+                        children: [
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(12),
+                            child: Image.file(File(_selectedImagePath!), width: availableWidth, height: previewHeightForLayout, fit: BoxFit.contain),
+                          ),
+                          Positioned.fill(
+                            child: GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onTapDown: (details) {
+                                final x = details.localPosition.dx.clamp(0.0, availableWidth);
+                                final y = details.localPosition.dy.clamp(0.0, previewHeightForLayout);
+                                final width = (availableWidth * 0.35).clamp(80.0, availableWidth);
+                                setState(() {
+                                  _selectedRect = Rect.fromLTWH(x, y, width, _minimumSelectionHeight);
+                                });
+                              },
+                              onPanStart: (details) {
+                                final x = details.localPosition.dx.clamp(0.0, availableWidth);
+                                final y = details.localPosition.dy.clamp(0.0, previewHeightForLayout);
+                                final width = (availableWidth * 0.35).clamp(80.0, availableWidth);
+                                setState(() {
+                                  _selectedRect = Rect.fromLTWH(x, y, width, _minimumSelectionHeight);
+                                });
+                              },
+                              onPanUpdate: (details) {
+                                final x = details.localPosition.dx.clamp(0.0, availableWidth);
+                                final y = details.localPosition.dy.clamp(0.0, previewHeightForLayout);
+                                setState(() {
+                                  _selectedRect = _normalizeRect(Rect.fromLTRB(_selectedRect.left, _selectedRect.top, x, y));
+                                });
+                              },
+                            ),
+                          ),
+                          if (hasSelection)
+                            Positioned(
+                              left: _selectedRect.left,
+                              top: _selectedRect.top,
+                              width: _selectedRect.width.clamp(1.0, availableWidth),
+                              height: _selectedRect.height.clamp(1.0, previewHeightForLayout),
+                              child: GestureDetector(
+                                onPanUpdate: (details) {
+                                  setState(() {
+                                    _selectedRect = _normalizeRect(_selectedRect.translate(details.delta.dx, details.delta.dy));
+                                  });
+                                },
+                                child: CustomPaint(
+                                  painter: _SelectionPainter(),
+                                  child: const SizedBox.expand(),
+                                ),
+                              ),
+                            ),
+                          if (hasSelection) ...[
+                            Positioned(
+                              left: _selectedRect.left + (_selectedRect.width / 2) - 9,
+                              top: _selectedRect.top - 9,
+                              child: GestureDetector(
+                                onVerticalDragUpdate: (details) {
+                                  setState(() {
+                                    final next = _selectedRect.top + details.delta.dy;
+                                    _selectedRect = _normalizeRect(Rect.fromLTRB(_selectedRect.left, next, _selectedRect.right, _selectedRect.bottom));
+                                  });
+                                },
+                                child: Container(width: 18, height: 18, decoration: BoxDecoration(color: Colors.blue.shade700, borderRadius: BorderRadius.circular(9))),
+                              ),
+                            ),
+                            Positioned(
+                              left: _selectedRect.left + (_selectedRect.width / 2) - 9,
+                              top: _selectedRect.bottom - 9,
+                              child: GestureDetector(
+                                onVerticalDragUpdate: (details) {
+                                  setState(() {
+                                    final next = _selectedRect.bottom + details.delta.dy;
+                                    _selectedRect = _normalizeRect(Rect.fromLTRB(_selectedRect.left, _selectedRect.top, _selectedRect.right, next));
+                                  });
+                                },
+                                child: Container(width: 18, height: 18, decoration: BoxDecoration(color: Colors.blue.shade700, borderRadius: BorderRadius.circular(9))),
+                              ),
+                            ),
+                            Positioned(
+                              left: _selectedRect.left - 9,
+                              top: _selectedRect.top + (_selectedRect.height / 2) - 9,
+                              child: GestureDetector(
+                                onHorizontalDragUpdate: (details) {
+                                  setState(() {
+                                    final next = _selectedRect.left + details.delta.dx;
+                                    _selectedRect = _normalizeRect(Rect.fromLTRB(next, _selectedRect.top, _selectedRect.right, _selectedRect.bottom));
+                                  });
+                                },
+                                child: Container(width: 18, height: 18, decoration: BoxDecoration(color: Colors.blue.shade700, borderRadius: BorderRadius.circular(9))),
+                              ),
+                            ),
+                            Positioned(
+                              left: _selectedRect.right - 9,
+                              top: _selectedRect.top + (_selectedRect.height / 2) - 9,
+                              child: GestureDetector(
+                                onHorizontalDragUpdate: (details) {
+                                  setState(() {
+                                    final next = _selectedRect.right + details.delta.dx;
+                                    _selectedRect = _normalizeRect(Rect.fromLTRB(_selectedRect.left, _selectedRect.top, next, _selectedRect.bottom));
+                                  });
+                                },
+                                child: Container(width: 18, height: 18, decoration: BoxDecoration(color: Colors.blue.shade700, borderRadius: BorderRadius.circular(9))),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    );
                   },
-                  onPanStart: (details) {
-                    final y = details.localPosition.dy.clamp(0.0, previewHeight);
-                    setState(() {
-                      _selectionStartY = y;
-                      _selectionEndY = (y + _minimumSelectionHeight).clamp(0.0, previewHeight);
-                    });
-                  },
-                  onPanUpdate: (details) {
-                    final y = details.localPosition.dy.clamp(0.0, previewHeight);
-                    final start = _selectionStartY ?? y;
-                    final end = y < start ? start + _minimumSelectionHeight : y;
-                    setState(() {
-                      _selectionStartY = y < start ? y : start;
-                      _selectionEndY = end < start + _minimumSelectionHeight
-                          ? start + _minimumSelectionHeight
-                          : end;
-                    });
-                  },
-                )),
-                if (hasSelection)
-                  Positioned(left: 0, right: 0, top: _selectionStartY!.clamp(0.0, previewHeight), height: (_selectionEndY! - _selectionStartY!).abs().clamp(12.0, previewHeight), child: Container(decoration: BoxDecoration(color: Colors.blue.withValues(alpha: 0.18), border: Border.all(color: Colors.blue, width: 2), borderRadius: BorderRadius.circular(6))))
-              ])),
+                ),
+              ),
               const SizedBox(height: 8),
-              Text(hasSelection ? '選択範囲: ${(_selectionStartY! / previewHeight * 100).toStringAsFixed(1)}% 〜 ${(_selectionEndY! / previewHeight * 100).toStringAsFixed(1)}%' : '選択中の行はありません', style: const TextStyle(fontSize: 12)),
+              Text(hasSelection ? '矩形: X ${_selectedRect.left.toStringAsFixed(1)}〜${_selectedRect.right.toStringAsFixed(1)} / Y ${_selectedRect.top.toStringAsFixed(1)}〜${_selectedRect.bottom.toStringAsFixed(1)} / 幅 ${_selectedRect.width.toStringAsFixed(1)}px / 高さ ${_selectedRect.height.toStringAsFixed(1)}px' : '矩形を選択してください', style: const TextStyle(fontSize: 12)),
               const SizedBox(height: 12),
-              ElevatedButton.icon(onPressed: _isOcrProcessing ? null : _runOcrOnSelection, icon: _isOcrProcessing ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.text_fields), label: const Text('選択行をOCRで解析')),
+              FilledButton.icon(
+                onPressed: hasSelection && !_isOcrProcessing ? _runOcrOnSelection : null,
+                icon: _isOcrProcessing
+                    ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                    : const Icon(Icons.text_fields),
+                label: Text(_isOcrProcessing ? 'OCR実行中...' : 'この矩形でOCR実行'),
+              ),
             ],
             const SizedBox(height: 16),
             if (_ocrRawText.isNotEmpty) ...[
-              const Text('OCRテキスト', style: TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 16),
+              const Text('OCR生データ', style: TextStyle(fontWeight: FontWeight.bold)),
               const SizedBox(height: 8),
               Container(padding: const EdgeInsets.all(12), color: Colors.grey.shade100, child: SelectableText(_ocrRawText)),
             ],
+            if (_debugExtractedTimes.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              const Text('抽出した時刻一覧', style: TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              Wrap(spacing: 8, runSpacing: 8, children: _debugExtractedTimes.map((time) => Chip(label: Text(time))).toList()),
+            ],
             if (_shiftCandidates.isNotEmpty) ...[
               const SizedBox(height: 16),
-              const Text('生成候補', style: TextStyle(fontWeight: FontWeight.bold)),
+              const Text('最終シフト候補', style: TextStyle(fontWeight: FontWeight.bold)),
               const SizedBox(height: 8),
               ..._shiftCandidates.map((candidate) => Card(child: ListTile(title: Text('${candidate.date.month}/${candidate.date.day}  ${candidate.startTime} - ${candidate.endTime}')))),
             ],
