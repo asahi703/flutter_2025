@@ -69,9 +69,11 @@ class _WorkInputState extends State<WorkInput> {
   Rect _selectedRect = Rect.zero;
   String _ocrRawText = '';
   List<String> _debugExtractedTimes = <String>[];
+  List<String> _debugPairs = <String>[];
+  List<String> _debugExcludedReasons = <String>[];
   List<ShiftCandidate> _shiftCandidates = [];
 
-  static final RegExp _timePattern = RegExp(r'(?<!\d)(?:[01]?\d|2[0-3])[:.\- ]?[0-5]\d\b');
+  static final RegExp _timePattern = RegExp(r'\b([01]?\d|2[0-3]):([0-5]\d)\b');
 
   Rect _normalizeRect(Rect rect) {
     final left = rect.left < rect.right ? rect.left : rect.right;
@@ -89,6 +91,14 @@ class _WorkInputState extends State<WorkInput> {
       }
     }
     return result;
+  }
+
+  List<(String start, String end)> _pairTimesInOrder(List<String> times) {
+    final pairs = <(String start, String end)>[];
+    for (var i = 0; i + 1 < times.length; i += 2) {
+      pairs.add((times[i], times[i + 1]));
+    }
+    return pairs;
   }
 
   int _durationHours(String start, String end) {
@@ -144,6 +154,8 @@ class _WorkInputState extends State<WorkInput> {
         _selectedRect = Rect.zero;
         _ocrRawText = '';
         _debugExtractedTimes = <String>[];
+        _debugPairs = <String>[];
+        _debugExcludedReasons = <String>[];
         _shiftCandidates = <ShiftCandidate>[];
       });
     } catch (e) {
@@ -231,10 +243,15 @@ class _WorkInputState extends State<WorkInput> {
       final inputImage = InputImage.fromFilePath(tempFile.path);
       final recognized = await _textRecognizer.processImage(inputImage);
       final text = recognized.text.trim();
-      final times = _dedupeConsecutiveTimes(_extractTimeTokens(text));
-      _debugExtractedTimes = List<String>.from(times);
+      final times = _extractTimeTokens(text);
+      final dedupedTimes = _dedupeConsecutiveTimes(times);
+      final pairs = _pairTimesInOrder(dedupedTimes);
 
-      if (times.length < 2) {
+      _debugExtractedTimes = List<String>.from(dedupedTimes);
+      _debugPairs = pairs.map((pair) => '${pair.$1}-${pair.$2}').toList();
+      _debugExcludedReasons = <String>[];
+
+      if (dedupedTimes.length < 2) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('OCR結果から時刻を抽出できませんでした。')));
         }
@@ -242,27 +259,42 @@ class _WorkInputState extends State<WorkInput> {
       }
 
       final candidates = <ShiftCandidate>[];
-      for (var i = 0; i + 1 < times.length; i += 2) {
-        final startTime = _formatTime(times[i]);
-        final endTime = _formatTime(times[i + 1]);
-        final duration = _durationHours(startTime, endTime);
-        final isNightShift = _toMinutes(startTime) > _toMinutes(endTime);
-        final warning = isNightShift && duration >= 12
-            ? '夜勤候補: $duration時間と長めです。OCR誤認識の可能性があります。'
-            : null;
-        candidates.add(ShiftCandidate(
-          date: DateTime(_selectedMonth.year, _selectedMonth.month, _startDay + (i ~/ 2)),
+      for (var i = 0; i < pairs.length; i++) {
+        final pair = pairs[i];
+        final startTime = _formatTime(pair.$1);
+        final endTime = _formatTime(pair.$2);
+        if (startTime == endTime) {
+          _debugExcludedReasons.add('${startTime}-${endTime}: 開始時刻と終了時刻が同じです');
+          continue;
+        }
+
+        final startMinutes = _toMinutes(startTime);
+        final endMinutes = _toMinutes(endTime);
+        final normalizedEndMinutes = endMinutes < startMinutes ? endMinutes + 24 * 60 : endMinutes;
+        final duration = ((normalizedEndMinutes - startMinutes) / 60).round();
+
+        if (duration < 1) {
+          _debugExcludedReasons.add('$startTime-$endTime: 勤務時間が1時間未満です');
+          continue;
+        }
+        if (duration > 16) {
+          _debugExcludedReasons.add('$startTime-$endTime: 勤務時間が16時間超です');
+          continue;
+        }
+
+        final candidate = ShiftCandidate(
+          date: DateTime(_selectedMonth.year, _selectedMonth.month, _startDay + i),
           startTime: startTime,
           endTime: endTime,
-        ));
-        if (warning != null) {
-          debugPrint('OCR警告: $warning');
-        }
+        );
+        candidates.add(candidate);
       }
 
       setState(() {
         _ocrRawText = text;
-        _debugExtractedTimes = List<String>.from(times);
+        _debugExtractedTimes = List<String>.from(dedupedTimes);
+        _debugPairs = pairs.map((pair) => '${pair.$1}-${pair.$2}').toList();
+        _debugExcludedReasons = List<String>.from(_debugExcludedReasons);
         _shiftCandidates = candidates;
       });
 
@@ -316,9 +348,30 @@ class _WorkInputState extends State<WorkInput> {
                   const SizedBox(height: 12),
                   const Text('OCR生データ', style: TextStyle(fontWeight: FontWeight.w600)),
                   Text('raw: ${_ocrRawText.isEmpty ? '(なし)' : _ocrRawText}'),
-                  const SizedBox(height: 8),
-                  Text('抽出時刻: ${_debugExtractedTimes.isEmpty ? '(なし)' : _debugExtractedTimes.join(', ')}'),
                   const SizedBox(height: 12),
+                  const Text('抽出時刻', style: TextStyle(fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 4),
+                  if (_debugExtractedTimes.isEmpty)
+                    const Text('(なし)')
+                  else
+                    Wrap(spacing: 8, runSpacing: 8, children: _debugExtractedTimes.map((time) => Chip(label: Text(time))).toList()),
+                  const SizedBox(height: 12),
+                  const Text('ペア', style: TextStyle(fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 4),
+                  if (_debugPairs.isEmpty)
+                    const Text('(なし)')
+                  else
+                    Wrap(spacing: 8, runSpacing: 8, children: _debugPairs.map((pair) => Chip(label: Text(pair))).toList()),
+                  const SizedBox(height: 12),
+                  const Text('除外理由', style: TextStyle(fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 4),
+                  if (_debugExcludedReasons.isEmpty)
+                    const Text('(なし)')
+                  else
+                    ..._debugExcludedReasons.map((reason) => Text('• $reason')),
+                  const SizedBox(height: 12),
+                  const Text('採用候補', style: TextStyle(fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 4),
                   ...List.generate(editableCandidates.length, (index) {
                     final candidate = editableCandidates[index];
                     return ListTile(
