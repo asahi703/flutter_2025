@@ -68,9 +68,6 @@ class _WorkInputState extends State<WorkInput> {
 
   Rect _selectedRect = Rect.zero;
   String _ocrRawText = '';
-  List<String> _debugExtractedTimes = <String>[];
-  List<String> _debugPairs = <String>[];
-  List<String> _debugExcludedReasons = <String>[];
   List<ShiftCandidate> _shiftCandidates = [];
 
   static final RegExp _timePattern = RegExp(r'\b([01]?\d|2[0-3]):([0-5]\d)\b');
@@ -153,9 +150,6 @@ class _WorkInputState extends State<WorkInput> {
         _imageAspectRatio = decoded.width / decoded.height;
         _selectedRect = Rect.zero;
         _ocrRawText = '';
-        _debugExtractedTimes = <String>[];
-        _debugPairs = <String>[];
-        _debugExcludedReasons = <String>[];
         _shiftCandidates = <ShiftCandidate>[];
       });
     } catch (e) {
@@ -247,9 +241,6 @@ class _WorkInputState extends State<WorkInput> {
       final dedupedTimes = _dedupeConsecutiveTimes(times);
       final pairs = _pairTimesInOrder(dedupedTimes);
 
-      _debugExtractedTimes = List<String>.from(dedupedTimes);
-      _debugPairs = pairs.map((pair) => '${pair.$1}-${pair.$2}').toList();
-      _debugExcludedReasons = <String>[];
 
       if (dedupedTimes.length < 2) {
         if (mounted) {
@@ -264,7 +255,6 @@ class _WorkInputState extends State<WorkInput> {
         final startTime = _formatTime(pair.$1);
         final endTime = _formatTime(pair.$2);
         if (startTime == endTime) {
-          _debugExcludedReasons.add('${startTime}-${endTime}: 開始時刻と終了時刻が同じです');
           continue;
         }
 
@@ -274,11 +264,9 @@ class _WorkInputState extends State<WorkInput> {
         final duration = ((normalizedEndMinutes - startMinutes) / 60).round();
 
         if (duration < 1) {
-          _debugExcludedReasons.add('$startTime-$endTime: 勤務時間が1時間未満です');
           continue;
         }
         if (duration > 16) {
-          _debugExcludedReasons.add('$startTime-$endTime: 勤務時間が16時間超です');
           continue;
         }
 
@@ -292,9 +280,7 @@ class _WorkInputState extends State<WorkInput> {
 
       setState(() {
         _ocrRawText = text;
-        _debugExtractedTimes = List<String>.from(dedupedTimes);
-        _debugPairs = pairs.map((pair) => '${pair.$1}-${pair.$2}').toList();
-        _debugExcludedReasons = List<String>.from(_debugExcludedReasons);
+
         _shiftCandidates = candidates;
       });
 
@@ -346,29 +332,6 @@ class _WorkInputState extends State<WorkInput> {
                   const SizedBox(height: 8),
                   Text('候補件数: ${editableCandidates.length}件'),
                   const SizedBox(height: 12),
-                  const Text('OCR生データ', style: TextStyle(fontWeight: FontWeight.w600)),
-                  Text('raw: ${_ocrRawText.isEmpty ? '(なし)' : _ocrRawText}'),
-                  const SizedBox(height: 12),
-                  const Text('抽出時刻', style: TextStyle(fontWeight: FontWeight.w600)),
-                  const SizedBox(height: 4),
-                  if (_debugExtractedTimes.isEmpty)
-                    const Text('(なし)')
-                  else
-                    Wrap(spacing: 8, runSpacing: 8, children: _debugExtractedTimes.map((time) => Chip(label: Text(time))).toList()),
-                  const SizedBox(height: 12),
-                  const Text('ペア', style: TextStyle(fontWeight: FontWeight.w600)),
-                  const SizedBox(height: 4),
-                  if (_debugPairs.isEmpty)
-                    const Text('(なし)')
-                  else
-                    Wrap(spacing: 8, runSpacing: 8, children: _debugPairs.map((pair) => Chip(label: Text(pair))).toList()),
-                  const SizedBox(height: 12),
-                  const Text('除外理由', style: TextStyle(fontWeight: FontWeight.w600)),
-                  const SizedBox(height: 4),
-                  if (_debugExcludedReasons.isEmpty)
-                    const Text('(なし)')
-                  else
-                    ..._debugExcludedReasons.map((reason) => Text('• $reason')),
                   const SizedBox(height: 12),
                   const Text('採用候補', style: TextStyle(fontWeight: FontWeight.w600)),
                   const SizedBox(height: 4),
@@ -614,25 +577,6 @@ class _WorkInputState extends State<WorkInput> {
                     : const Icon(Icons.text_fields),
                 label: Text(_isOcrProcessing ? 'OCR実行中...' : 'この矩形でOCR実行'),
               ),
-            ],
-            const SizedBox(height: 16),
-            if (_ocrRawText.isNotEmpty) ...[
-              const SizedBox(height: 16),
-              const Text('OCR生データ', style: TextStyle(fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              Container(padding: const EdgeInsets.all(12), color: Colors.grey.shade100, child: SelectableText(_ocrRawText)),
-            ],
-            if (_debugExtractedTimes.isNotEmpty) ...[
-              const SizedBox(height: 16),
-              const Text('抽出した時刻一覧', style: TextStyle(fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              Wrap(spacing: 8, runSpacing: 8, children: _debugExtractedTimes.map((time) => Chip(label: Text(time))).toList()),
-            ],
-            if (_shiftCandidates.isNotEmpty) ...[
-              const SizedBox(height: 16),
-              const Text('最終シフト候補', style: TextStyle(fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              ..._shiftCandidates.map((candidate) => Card(child: ListTile(title: Text('${candidate.date.month}/${candidate.date.day}  ${candidate.startTime} - ${candidate.endTime}')))),
             ],
           ],
         ),
