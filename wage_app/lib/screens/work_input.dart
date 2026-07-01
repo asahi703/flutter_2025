@@ -51,8 +51,6 @@ class _SelectionPainter extends CustomPainter {
 }
 
 class _WorkInputState extends State<WorkInput> {
-  static const double _minimumSelectionHeight = 36.0;
-
   final ImagePicker _picker = ImagePicker();
   final TextRecognizer _textRecognizer = TextRecognizer();
 
@@ -67,10 +65,13 @@ class _WorkInputState extends State<WorkInput> {
   double _viewerScale = 1.0;
 
   Rect _selectedRect = Rect.zero;
+  Offset? _selectionStart;
   String _ocrRawText = '';
   List<ShiftCandidate> _shiftCandidates = [];
+  List<Map<String, dynamic>> _ocrDebugEntries = [];
+  Uint8List? _debugCropBytes;
 
-  static final RegExp _timePattern = RegExp(r'\b([01]?\d|2[0-3]):([0-5]\d)\b');
+  static final RegExp _timePattern = RegExp(r'([01]?\d|2[0-3])[:：.]([0-5]\d)');
 
   Rect _normalizeRect(Rect rect) {
     final left = rect.left < rect.right ? rect.left : rect.right;
@@ -80,6 +81,98 @@ class _WorkInputState extends State<WorkInput> {
     return Rect.fromLTRB(left, top, right, bottom);
   }
 
+  // ===== Added =====
+  Rect _constrainRect(Rect rect, double maxWidth, double maxHeight) {
+    final normalized = _normalizeRect(rect);
+    final left = normalized.left.clamp(0.0, maxWidth);
+    final top = normalized.top.clamp(0.0, maxHeight);
+    final right = normalized.right.clamp(0.0, maxWidth);
+    final bottom = normalized.bottom.clamp(0.0, maxHeight);
+    return _normalizeRect(Rect.fromLTRB(left, top, right, bottom));
+  }
+
+  Rect _buildSelectionRect(Offset start, Offset end, double maxWidth, double maxHeight) {
+    return _constrainRect(Rect.fromPoints(start, end), maxWidth, maxHeight);
+  }
+
+  void _startSelection(Offset localPosition, double maxWidth, double maxHeight) {
+    setState(() {
+      _selectionStart = Offset(localPosition.dx.clamp(0.0, maxWidth), localPosition.dy.clamp(0.0, maxHeight));
+      _selectedRect = Rect.fromLTWH(_selectionStart!.dx, _selectionStart!.dy, 1.0, 1.0);
+    });
+  }
+
+  image_lib.Image _cropRow(image_lib.Image image, Rect rowRect) {
+    return image_lib.copyCrop(
+      image,
+      x: rowRect.left.toInt(),
+      y: rowRect.top.toInt(),
+      width: rowRect.width.toInt().clamp(32, image.width),
+      height: rowRect.height.toInt().clamp(32, image.height),
+    );
+  }
+
+  List<Rect> _splitColumns(image_lib.Image image, int columnCount) {
+    final columns = <Rect>[];
+    for (var index = 0; index < columnCount; index++) {
+      final startX = (index * image.width / columnCount).floor();
+      final endX = index + 1 == columnCount ? image.width : ((index + 1) * image.width / columnCount).floor();
+      if (endX <= startX) {
+        continue;
+      }
+      columns.add(Rect.fromLTWH(startX.toDouble(), 0, (endX - startX).toDouble(), image.height.toDouble()));
+    }
+    return columns;
+  }
+
+  Future<Map<String, dynamic>> _processColumn(image_lib.Image rowImage, Rect columnRect, int day) async {
+    final columnImage = image_lib.copyCrop(
+      rowImage,
+      x: columnRect.left.toInt(),
+      y: columnRect.top.toInt(),
+      width: columnRect.width.toInt().clamp(32, rowImage.width),
+      height: columnRect.height.toInt().clamp(32, rowImage.height),
+    );
+    final columnBytes = Uint8List.fromList(image_lib.encodeJpg(columnImage, quality: 95));
+    final tempColumnFile = File('${Directory.systemTemp.path}/shift_column_${day}_${DateTime.now().millisecondsSinceEpoch}.jpg');
+    await tempColumnFile.writeAsBytes(columnBytes);
+
+    final inputImage = InputImage.fromFilePath(tempColumnFile.path);
+    final recognized = await _textRecognizer.processImage(inputImage);
+    final extractedTimes = _extractTimeTokens(recognized.text.trim());
+    final dedupedTimes = _dedupeConsecutiveTimes(extractedTimes);
+
+    String startTime = '休';
+    String endTime = '休';
+    if (dedupedTimes.length >= 2) {
+      startTime = _formatTime(dedupedTimes.first);
+      endTime = _formatTime(dedupedTimes.last);
+    }
+
+    return {
+      'day': day,
+      'ocrText': recognized.text.trim(),
+      'extractedTimes': dedupedTimes,
+      'startTime': startTime,
+      'endTime': endTime,
+      'selectedText': startTime == '休' ? '休み' : '$startTime-$endTime',
+      'columnBytes': columnBytes,
+    };
+  }
+
+  void _showDebugCrop(Uint8List cropBytes) {
+    if (mounted) {
+      setState(() => _debugCropBytes = cropBytes);
+    }
+  }
+
+  bool _isRestCandidate(ShiftCandidate candidate) {
+    return candidate.startTime == '休' && candidate.endTime == '休';
+  }
+  // ===== End Added =====
+
+  // ===== End Added =====
+
   List<String> _dedupeConsecutiveTimes(List<String> times) {
     final result = <String>[];
     for (final time in times) {
@@ -88,14 +181,6 @@ class _WorkInputState extends State<WorkInput> {
       }
     }
     return result;
-  }
-
-  List<(String start, String end)> _pairTimesInOrder(List<String> times) {
-    final pairs = <(String start, String end)>[];
-    for (var i = 0; i + 1 < times.length; i += 2) {
-      pairs.add((times[i], times[i + 1]));
-    }
-    return pairs;
   }
 
   int _durationHours(String start, String end) {
@@ -149,8 +234,11 @@ class _WorkInputState extends State<WorkInput> {
         _selectedImageBytes = bytes;
         _imageAspectRatio = decoded.width / decoded.height;
         _selectedRect = Rect.zero;
+        _selectionStart = null;
         _ocrRawText = '';
         _shiftCandidates = <ShiftCandidate>[];
+        _ocrDebugEntries = <Map<String, dynamic>>[];
+        _debugCropBytes = null;
       });
     } catch (e) {
       if (mounted) {
@@ -167,7 +255,7 @@ class _WorkInputState extends State<WorkInput> {
 
     final rect = _normalizeRect(_selectedRect);
     if (rect.width <= 0 || rect.height <= 0) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('矩形選択範囲を指定してください。')));
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('行をタップしてOCR対象を指定してください。')));
       return;
     }
 
@@ -194,94 +282,43 @@ class _WorkInputState extends State<WorkInput> {
         (rect.right * scaleX).round().clamp(1, decoded.width).toDouble(),
         (rect.bottom * scaleY).round().clamp(1, decoded.height).toDouble(),
       );
-      final cropStartX = cropRect.left.toInt();
-      final cropEndX = cropRect.right.toInt();
-      final cropStartY = cropRect.top.toInt();
-      final cropEndY = cropRect.bottom.toInt();
-      final cropWidth = (cropEndX - cropStartX).clamp(32, decoded.width - cropStartX);
-      final cropHeight = (cropEndY - cropStartY).clamp(32, decoded.height - cropStartY);
 
-      debugPrint('OCR対象画像 size=${decoded.width}x${decoded.height}, preview=${previewWidth.toStringAsFixed(1)}x${previewHeight.toStringAsFixed(1)}, scale=$_viewerScale, rect=($cropStartX,$cropStartY,$cropWidth,$cropHeight)');
-
-      if (decoded.width < 32 || decoded.height < 32 || cropWidth < 32 || cropHeight < 32 || cropStartX < 0 || cropEndX > decoded.width || cropStartY < 0 || cropEndY > decoded.height) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('切り出し画像が小さすぎるためOCRできません。選択範囲を広げてください。')),
-          );
-        }
-        return;
-      }
-
-      final cropped = image_lib.copyCrop(
-        decoded,
-        x: cropStartX,
-        y: cropStartY,
-        width: cropWidth,
-        height: cropHeight,
-      );
-      debugPrint('切り出し後 size=${cropped.width}x${cropped.height}');
-
-      if (cropped.width < 32 || cropped.height < 32) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('切り出した画像がMLKitの最小サイズ未満です。')),
-          );
-        }
-        return;
-      }
-
+      final cropped = _cropRow(decoded, cropRect);
       final croppedBytes = Uint8List.fromList(image_lib.encodeJpg(cropped, quality: 95));
-      final tempFile = File('${Directory.systemTemp.path}/shift_crop_${DateTime.now().millisecondsSinceEpoch}.jpg');
-      await tempFile.writeAsBytes(croppedBytes);
+      _showDebugCrop(croppedBytes);
 
-      final inputImage = InputImage.fromFilePath(tempFile.path);
-      final recognized = await _textRecognizer.processImage(inputImage);
-      final text = recognized.text.trim();
-      final times = _extractTimeTokens(text);
-      final dedupedTimes = _dedupeConsecutiveTimes(times);
-      final pairs = _pairTimesInOrder(dedupedTimes);
-
-
-      if (dedupedTimes.length < 2) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('OCR結果から時刻を抽出できませんでした。')));
-        }
-        return;
-      }
-
+      final daysInMonth = DateUtils.getDaysInMonth(_selectedMonth.year, _selectedMonth.month);
+      final debugEntries = <Map<String, dynamic>>[];
       final candidates = <ShiftCandidate>[];
-      for (var i = 0; i < pairs.length; i++) {
-        final pair = pairs[i];
-        final startTime = _formatTime(pair.$1);
-        final endTime = _formatTime(pair.$2);
-        if (startTime == endTime) {
-          continue;
-        }
+      final rowColumns = _splitColumns(cropped, daysInMonth);
 
-        final startMinutes = _toMinutes(startTime);
-        final endMinutes = _toMinutes(endTime);
-        final normalizedEndMinutes = endMinutes < startMinutes ? endMinutes + 24 * 60 : endMinutes;
-        final duration = ((normalizedEndMinutes - startMinutes) / 60).round();
+      for (var index = 0; index < rowColumns.length; index++) {
+        final day = index + 1;
+        final columnResult = await _processColumn(cropped, rowColumns[index], day);
+        debugEntries.add(columnResult);
 
-        if (duration < 1) {
-          continue;
+        final startTime = columnResult['startTime'] as String;
+        final endTime = columnResult['endTime'] as String;
+        final dayNumber = (_startDay - 1 + day).clamp(1, daysInMonth);
+        if (startTime != '休') {
+          candidates.add(ShiftCandidate(
+            date: DateTime(_selectedMonth.year, _selectedMonth.month, dayNumber),
+            startTime: startTime,
+            endTime: endTime,
+          ));
+        } else {
+          candidates.add(ShiftCandidate(
+            date: DateTime(_selectedMonth.year, _selectedMonth.month, dayNumber),
+            startTime: '休',
+            endTime: '休',
+          ));
         }
-        if (duration > 16) {
-          continue;
-        }
-
-        final candidate = ShiftCandidate(
-          date: DateTime(_selectedMonth.year, _selectedMonth.month, _startDay + i),
-          startTime: startTime,
-          endTime: endTime,
-        );
-        candidates.add(candidate);
       }
 
       setState(() {
-        _ocrRawText = text;
-
+        _ocrRawText = debugEntries.map((entry) => '【${entry['day']}日】${entry['ocrText']}').join('\n');
         _shiftCandidates = candidates;
+        _ocrDebugEntries = debugEntries;
       });
 
       if (mounted) {
@@ -297,20 +334,22 @@ class _WorkInputState extends State<WorkInput> {
   }
 
   List<String> _extractTimeTokens(String text) {
-    final matches = _timePattern.allMatches(text).toList();
     final extracted = <String>[];
-    for (final match in matches) {
-      final token = match.group(0)!.replaceAll(RegExp(r'[^0-9:]'), '');
-      final parts = token.split(':');
-      if (parts.length == 2) {
-        final hour = int.tryParse(parts[0]);
-        final minute = int.tryParse(parts[1]);
-        if (hour != null && minute != null) {
-          extracted.add('${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}');
-        }
+    for (final match in _timePattern.allMatches(text)) {
+      final hour = int.tryParse(match.group(1)!);
+      final minute = int.tryParse(match.group(2)!);
+      if (hour != null && minute != null) {
+        extracted.add('${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}');
       }
     }
     return extracted;
+  }
+
+  String _formatCandidateLabel(ShiftCandidate candidate) {
+    if (_isRestCandidate(candidate)) {
+      return '${candidate.date.month}/${candidate.date.day}  休み';
+    }
+    return '${candidate.date.month}/${candidate.date.day}  ${candidate.startTime} - ${candidate.endTime}';
   }
 
   Future<void> _showCandidateReviewDialog(List<ShiftCandidate> candidates) async {
@@ -342,7 +381,7 @@ class _WorkInputState extends State<WorkInput> {
                         value: selected[index],
                         onChanged: (value) => setDialogState(() => selected[index] = value ?? false),
                       ),
-                      title: Text('${candidate.date.month}/${candidate.date.day}  ${candidate.startTime} - ${candidate.endTime}'),
+                      title: Text(_formatCandidateLabel(candidate)),
                       subtitle: _durationHours(candidate.startTime, candidate.endTime) >= 12
                           ? const Text('夜勤候補として判定されました。OCR誤認識の可能性があります。')
                           : null,
@@ -370,7 +409,9 @@ class _WorkInputState extends State<WorkInput> {
     if (confirmed == true) {
       final saved = <ShiftCandidate>[];
       for (var i = 0; i < editableCandidates.length; i++) {
-        if (selected[i]) saved.add(editableCandidates[i]);
+        if (selected[i] && !_isRestCandidate(editableCandidates[i])) {
+          saved.add(editableCandidates[i]);
+        }
       }
       widget.onSaveShiftCandidates(saved, _selectedWorkplaceId!);
       if (mounted) {
@@ -422,7 +463,7 @@ class _WorkInputState extends State<WorkInput> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text('シフト表から矩形を選択', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+            const Text('シフト表の行を選択', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
             const SizedBox(height: 12),
             Row(children: [
               Expanded(child: DropdownButtonFormField<int>(initialValue: _selectedMonth.year, decoration: const InputDecoration(labelText: '対象年'), items: List.generate(5, (index) => DateTime.now().year - 1 + index).map((year) => DropdownMenuItem(value: year, child: Text('$year年'))).toList(), onChanged: (year) { if (year == null) return; setState(() => _selectedMonth = DateTime(year, _selectedMonth.month)); })),
@@ -437,7 +478,10 @@ class _WorkInputState extends State<WorkInput> {
             ElevatedButton.icon(onPressed: _pickImage, icon: const Icon(Icons.image), label: const Text('シフト表画像を選択')),
             const SizedBox(height: 12),
             if (_selectedImagePath != null) ...[
-              const Text('矩形をドラッグしてOCR対象範囲を指定してください', style: TextStyle(color: Colors.grey)),
+              const Text(
+                '画像上をドラッグしてOCR対象の矩形を指定してください',
+                style: TextStyle(color: Colors.grey),
+              ),
               const SizedBox(height: 8),
               SizedBox(
                 width: double.infinity,
@@ -457,110 +501,51 @@ class _WorkInputState extends State<WorkInput> {
                       },
                       child: Stack(
                         children: [
-                          ClipRRect(
-                            borderRadius: BorderRadius.circular(12),
-                            child: Image.file(File(_selectedImagePath!), width: availableWidth, height: previewHeightForLayout, fit: BoxFit.contain),
-                          ),
-                          Positioned.fill(
-                            child: GestureDetector(
-                              behavior: HitTestBehavior.opaque,
-                              onTapDown: (details) {
-                                final x = details.localPosition.dx.clamp(0.0, availableWidth);
-                                final y = details.localPosition.dy.clamp(0.0, previewHeightForLayout);
-                                final width = (availableWidth * 0.35).clamp(80.0, availableWidth);
-                                setState(() {
-                                  _selectedRect = Rect.fromLTWH(x, y, width, _minimumSelectionHeight);
-                                });
-                              },
-                              onPanStart: (details) {
-                                final x = details.localPosition.dx.clamp(0.0, availableWidth);
-                                final y = details.localPosition.dy.clamp(0.0, previewHeightForLayout);
-                                final width = (availableWidth * 0.35).clamp(80.0, availableWidth);
-                                setState(() {
-                                  _selectedRect = Rect.fromLTWH(x, y, width, _minimumSelectionHeight);
-                                });
-                              },
-                              onPanUpdate: (details) {
-                                final x = details.localPosition.dx.clamp(0.0, availableWidth);
-                                final y = details.localPosition.dy.clamp(0.0, previewHeightForLayout);
-                                setState(() {
-                                  _selectedRect = _normalizeRect(Rect.fromLTRB(_selectedRect.left, _selectedRect.top, x, y));
-                                });
-                              },
-                            ),
-                          ),
-                          if (hasSelection)
-                            Positioned(
-                              left: _selectedRect.left,
-                              top: _selectedRect.top,
-                              width: _selectedRect.width.clamp(1.0, availableWidth),
-                              height: _selectedRect.height.clamp(1.0, previewHeightForLayout),
-                              child: GestureDetector(
-                                onPanUpdate: (details) {
-                                  setState(() {
-                                    _selectedRect = _normalizeRect(_selectedRect.translate(details.delta.dx, details.delta.dy));
-                                  });
-                                },
-                                child: CustomPaint(
-                                  painter: _SelectionPainter(),
-                                  child: const SizedBox.expand(),
+                          GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onPanStart: (details) {
+                              final localPosition = details.localPosition;
+                              _startSelection(Offset(localPosition.dx, localPosition.dy), availableWidth, previewHeightForLayout);
+                            },
+                            onPanUpdate: (details) {
+                              if (_selectionStart == null) return;
+                              final localPosition = details.localPosition;
+                              setState(() {
+                                _selectedRect = _buildSelectionRect(
+                                  _selectionStart!,
+                                  Offset(localPosition.dx.clamp(0.0, availableWidth), localPosition.dy.clamp(0.0, previewHeightForLayout)),
+                                  availableWidth,
+                                  previewHeightForLayout,
+                                );
+                              });
+                            },
+                            onPanEnd: (_) {
+                              setState(() => _selectionStart = null);
+                            },
+                            onTapDown: (details) {
+                              final localPosition = details.localPosition;
+                              _startSelection(Offset(localPosition.dx, localPosition.dy), availableWidth, previewHeightForLayout);
+                            },
+                            child: Stack(
+                              children: [
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(12),
+                                  child: Image.file(File(_selectedImagePath!), width: availableWidth, height: previewHeightForLayout, fit: BoxFit.contain),
                                 ),
-                              ),
+                                if (hasSelection)
+                                  Positioned(
+                                    left: _selectedRect.left,
+                                    top: _selectedRect.top,
+                                    width: _selectedRect.width.clamp(1.0, availableWidth),
+                                    height: _selectedRect.height.clamp(1.0, previewHeightForLayout),
+                                    child: CustomPaint(
+                                      painter: _SelectionPainter(),
+                                      child: const SizedBox.expand(),
+                                    ),
+                                  ),
+                              ],
                             ),
-                          if (hasSelection) ...[
-                            Positioned(
-                              left: _selectedRect.left + (_selectedRect.width / 2) - 9,
-                              top: _selectedRect.top - 9,
-                              child: GestureDetector(
-                                onVerticalDragUpdate: (details) {
-                                  setState(() {
-                                    final next = _selectedRect.top + details.delta.dy;
-                                    _selectedRect = _normalizeRect(Rect.fromLTRB(_selectedRect.left, next, _selectedRect.right, _selectedRect.bottom));
-                                  });
-                                },
-                                child: Container(width: 18, height: 18, decoration: BoxDecoration(color: Colors.blue.shade700, borderRadius: BorderRadius.circular(9))),
-                              ),
-                            ),
-                            Positioned(
-                              left: _selectedRect.left + (_selectedRect.width / 2) - 9,
-                              top: _selectedRect.bottom - 9,
-                              child: GestureDetector(
-                                onVerticalDragUpdate: (details) {
-                                  setState(() {
-                                    final next = _selectedRect.bottom + details.delta.dy;
-                                    _selectedRect = _normalizeRect(Rect.fromLTRB(_selectedRect.left, _selectedRect.top, _selectedRect.right, next));
-                                  });
-                                },
-                                child: Container(width: 18, height: 18, decoration: BoxDecoration(color: Colors.blue.shade700, borderRadius: BorderRadius.circular(9))),
-                              ),
-                            ),
-                            Positioned(
-                              left: _selectedRect.left - 9,
-                              top: _selectedRect.top + (_selectedRect.height / 2) - 9,
-                              child: GestureDetector(
-                                onHorizontalDragUpdate: (details) {
-                                  setState(() {
-                                    final next = _selectedRect.left + details.delta.dx;
-                                    _selectedRect = _normalizeRect(Rect.fromLTRB(next, _selectedRect.top, _selectedRect.right, _selectedRect.bottom));
-                                  });
-                                },
-                                child: Container(width: 18, height: 18, decoration: BoxDecoration(color: Colors.blue.shade700, borderRadius: BorderRadius.circular(9))),
-                              ),
-                            ),
-                            Positioned(
-                              left: _selectedRect.right - 9,
-                              top: _selectedRect.top + (_selectedRect.height / 2) - 9,
-                              child: GestureDetector(
-                                onHorizontalDragUpdate: (details) {
-                                  setState(() {
-                                    final next = _selectedRect.right + details.delta.dx;
-                                    _selectedRect = _normalizeRect(Rect.fromLTRB(_selectedRect.left, _selectedRect.top, next, _selectedRect.bottom));
-                                  });
-                                },
-                                child: Container(width: 18, height: 18, decoration: BoxDecoration(color: Colors.blue.shade700, borderRadius: BorderRadius.circular(9))),
-                              ),
-                            ),
-                          ],
+                          ),
                         ],
                       ),
                     );
@@ -568,14 +553,70 @@ class _WorkInputState extends State<WorkInput> {
                 ),
               ),
               const SizedBox(height: 8),
-              Text(hasSelection ? '矩形: X ${_selectedRect.left.toStringAsFixed(1)}〜${_selectedRect.right.toStringAsFixed(1)} / Y ${_selectedRect.top.toStringAsFixed(1)}〜${_selectedRect.bottom.toStringAsFixed(1)} / 幅 ${_selectedRect.width.toStringAsFixed(1)}px / 高さ ${_selectedRect.height.toStringAsFixed(1)}px' : '矩形を選択してください', style: const TextStyle(fontSize: 12)),
+              Text(
+                hasSelection
+                    ? '選択行: Y ${_selectedRect.top.toStringAsFixed(1)}〜${_selectedRect.bottom.toStringAsFixed(1)} / 高さ ${_selectedRect.height.toStringAsFixed(1)}px'
+                    : '行を選択してください',
+                style: const TextStyle(fontSize: 12),
+              ),
+              Text(
+                _ocrRawText.isEmpty
+                    ? 'OCR結果: 未実行'
+                    : 'OCR結果: ${_shiftCandidates.length}件の候補を検出済み',
+                style: const TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+              if (_debugCropBytes != null) ...[
+                const SizedBox(height: 12),
+                const Text('【OCR対象画像】', style: TextStyle(fontWeight: FontWeight.w600)),
+                const SizedBox(height: 8),
+                Container(
+                  height: 180,
+                  decoration: BoxDecoration(border: Border.all(color: Colors.grey.shade300)),
+                  child: ClipRRect(
+                    child: Image.memory(_debugCropBytes!, fit: BoxFit.contain),
+                  ),
+                ),
+              ],
+              if (_ocrDebugEntries.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                const Text('OCRデバッグ', style: TextStyle(fontWeight: FontWeight.w600)),
+                const SizedBox(height: 8),
+                ...List.generate(_ocrDebugEntries.length, (index) {
+                  final entry = _ocrDebugEntries[index];
+                  final day = entry['day'] as int;
+                  final extractedTimes = entry['extractedTimes'] as List<String>;
+                  final selectedText = entry['selectedText'] as String;
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        border: Border.all(color: Colors.grey.shade300),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('$day日', style: const TextStyle(fontWeight: FontWeight.w600)),
+                          const SizedBox(height: 4),
+                          Text('OCR: ${entry['ocrText'].toString().isEmpty ? 'なし' : entry['ocrText']}', style: const TextStyle(fontSize: 12)),
+                          const SizedBox(height: 4),
+                          Text(extractedTimes.isEmpty ? '勤務なし' : '開始${extractedTimes.first} / 終了${extractedTimes.last}', style: const TextStyle(fontSize: 12)),
+                          const SizedBox(height: 4),
+                          Text('採用: $selectedText', style: const TextStyle(fontSize: 12, color: Colors.blueGrey)),
+                        ],
+                      ),
+                    ),
+                  );
+                }),
+              ],
               const SizedBox(height: 12),
               FilledButton.icon(
                 onPressed: hasSelection && !_isOcrProcessing ? _runOcrOnSelection : null,
                 icon: _isOcrProcessing
                     ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
                     : const Icon(Icons.text_fields),
-                label: Text(_isOcrProcessing ? 'OCR実行中...' : 'この矩形でOCR実行'),
+                label: Text(_isOcrProcessing ? 'OCR実行中...' : 'この行でOCR実行'),
               ),
             ],
           ],
